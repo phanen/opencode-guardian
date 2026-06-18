@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-guardian",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode plugin that auto-reviews approval requests using a guardian LLM with a risk-based decision framework",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "format": "biome format --write",
+    "format:check": "biome format",
+    "lint": "biome lint",
+    "lint:fix": "biome lint --write",
+    "check": "biome check",
+    "check:fix": "biome check --write"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "plugin",
+    "guardian",
+    "auto-review",
+    "approval",
+    "permission"
+  ],
+  "author": "phanen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/phanen/opencode-guardian.git"
+  },
+  "files": [
+    "dist/",
+    "commands/",
+    "scripts/install.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=0.13.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.0",
+    "@opencode-ai/plugin": ">=0.13.7",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.2.10"
+  }
+}

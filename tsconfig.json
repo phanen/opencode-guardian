@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "lib": ["ES2022"],
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "outDir": "./dist",
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": [
+    "index.ts",
+    "guardianPlugin.ts",
+    "guardianCore.ts",
+    "review.ts",
+    "prompt.ts",
+    "policyTemplate.ts",
+    "policyConfig.ts",
+    "commands.ts",
+    "state.ts",
+    "version.ts"
+  ],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "commands"]
+}
