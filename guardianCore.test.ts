@@ -46,8 +46,17 @@ function makeDeps(d: Deps) {
         }
       );
     },
-    replyPermission: async (requestID: string, reply: GuardianReply, message?: string) => {
-      replies.push(message !== undefined ? { requestID, reply, message } : { requestID, reply });
+    replyPermission: async (
+      sessionID: string,
+      requestID: string,
+      reply: GuardianReply,
+      message?: string,
+    ) => {
+      replies.push(
+        message !== undefined
+          ? { requestID, reply, message, sessionID }
+          : { requestID, reply, sessionID },
+      );
     },
   };
 
@@ -97,7 +106,7 @@ describe("guardianCore — event-driven permission review", () => {
     await emitPermissionAsked(hooks, sampleRequest);
     expect(t.reviewCalls).toHaveLength(1);
     expect(t.transcriptsLoaded).toEqual(["ses-1"]);
-    expect(t.replies).toEqual([{ requestID: "req-1", reply: "once" }]);
+    expect(t.replies).toEqual([{ sessionID: "ses-1", requestID: "req-1", reply: "once" }]);
   });
 
   test("auto_review + deny → reply reject with rationale", async () => {

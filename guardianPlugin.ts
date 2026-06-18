@@ -80,6 +80,7 @@ async function loadTranscript(
 
 async function replyPermission(
   ctx: PluginCtx,
+  sessionID: string,
   requestID: string,
   reply: GuardianReply,
   message?: string,
@@ -89,13 +90,20 @@ async function replyPermission(
   if (ctx.directory) params.set("directory", ctx.directory);
   if (ctx.project?.workspaceID) params.set("workspace", ctx.project.workspaceID);
   const qs = params.toString();
-  const url = `${base}/permission/${encodeURIComponent(requestID)}/reply${qs ? `?${qs}` : ""}`;
-  const body: { reply: GuardianReply; message?: string } = { reply };
+
+  // Use the deprecated session-scoped endpoint that opencode.nvim hits.
+  // Same server-side handler (Permission.reply) as the v2
+  // /permission/{requestID}/reply endpoint, just a different URL
+  // shape with sessionID in the path and `response` in the body.
+  const url =
+    `${base}/session/${encodeURIComponent(sessionID)}` +
+    `/permissions/${encodeURIComponent(requestID)}` +
+    `${qs ? `?${qs}` : ""}`;
+  const body: { response: GuardianReply; message?: string } = { response: reply };
   if (message) body.message = message;
 
-  // Diagnostic: write the URL we are about to hit and the response status to
-  // the guardian debug log so we can confirm the HTTP reply is actually
-  // reaching the opencode server.
+  // Verbose diagnostic logging — full URL, full body, full response
+  // status and body so we can compare against opencode.nvim's behavior.
   const { appendFileSync } = await import("node:fs");
   const log = (msg: string) => {
     try {
@@ -106,24 +114,45 @@ async function replyPermission(
     } catch {}
   };
 
+  log(`request_id=${requestID} session_id=${sessionID} reply=${reply}`);
+  log(`request_id=${requestID} url=${url}`);
+  log(`request_id=${requestID} body=${JSON.stringify(body)}`);
+
+  const t0 = Date.now();
   try {
-    log(`POST ${url} body=${JSON.stringify(body)}`);
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    const elapsed = Date.now() - t0;
     const text = await res.text();
-    log(`response status=${res.status} ok=${res.ok} body=${text.slice(0, 300)}`);
+    log(
+      `request_id=${requestID} response status=${res.status} ok=${res.ok} ` +
+        `elapsed_ms=${elapsed} content-type=${res.headers.get("content-type") ?? "(none)"} ` +
+        `body=${text.slice(0, 500)}`,
+    );
+    log(
+      `request_id=${requestID} response_headers=${JSON.stringify(
+        Object.fromEntries(res.headers.entries()),
+      )}`,
+    );
     if (res.status === 404) {
-      // request already resolved by the user or another path — benign
+      // request already resolved by the user, or the parent fiber was
+      // interrupted and the Effect.ensuring cleanup cleared it from
+      // pending without firing permission.replied. The TUI's local
+      // store still has the request, so the dialog stays. Benign from
+      // the plugin's perspective — we tried.
+      log(`request_id=${requestID} outcome=404_benign (request already gone from pending)`);
       return;
     }
     if (!res.ok) {
+      log(`request_id=${requestID} outcome=http_error status=${res.status}`);
       throw new Error(`permission.reply failed: ${res.status} ${text}`);
     }
+    log(`request_id=${requestID} outcome=success status=${res.status}`);
   } catch (err) {
-    log(`fetch error: ${(err as Error).message}`);
+    log(`request_id=${requestID} fetch_error=${(err as Error).message}`);
     throw err;
   }
 }
@@ -179,7 +208,8 @@ export default async function GuardianPlugin(
       });
       return assessment;
     },
-    replyPermission: (requestID, reply, message) => replyPermission(ctx, requestID, reply, message),
+    replyPermission: (sessionID, requestID, reply, message) =>
+      replyPermission(ctx, sessionID, requestID, reply, message),
   };
 
   return createGuardianHooks(options, deps);

@@ -55,7 +55,12 @@ export interface GuardianRuntimeDeps {
    * "not found" errors (the user may have already responded manually before
    * guardian finished) and surface other failures.
    */
-  replyPermission: (requestID: string, reply: GuardianReply, message?: string) => Promise<void>;
+  replyPermission: (
+    sessionID: string,
+    requestID: string,
+    reply: GuardianReply,
+    message?: string,
+  ) => Promise<void>;
 }
 
 /**
@@ -253,7 +258,7 @@ export async function createGuardianHooks(
         JSON.stringify(patterns),
       );
       try {
-        await deps.replyPermission(req.id, "reject", "bash invocation of guardian is not allowed");
+        await deps.replyPermission(req.sessionID, req.id, "reject", "bash invocation of guardian is not allowed");
       } catch (err) {
         guardianLog("[DENY-LOCAL] reply failed:", req.id, String(err));
       }
@@ -275,6 +280,7 @@ export async function createGuardianHooks(
       );
       try {
         await deps.replyPermission(
+          req.sessionID,
           req.id,
           "reject",
           "tool blocked while /guardian command is in flight",
@@ -374,7 +380,7 @@ export async function createGuardianHooks(
         assessment.rationale.slice(0, 200),
       );
       try {
-        await deps.replyPermission(req.id, "once");
+        await deps.replyPermission(req.sessionID, req.id, "once");
       } catch (err) {
         guardianLog("[ALLOW] reply failed:", req.id, String(err));
       }
@@ -434,7 +440,7 @@ export async function createGuardianHooks(
       assessment.rationale.slice(0, 200),
     );
     try {
-      await deps.replyPermission(req.id, "reject", denialMessage);
+      await deps.replyPermission(req.sessionID, req.id, "reject", denialMessage);
     } catch (err) {
       guardianLog("[DENY] reply failed:", req.id, String(err));
     }
