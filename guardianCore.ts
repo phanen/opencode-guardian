@@ -1,4 +1,5 @@
 import { appendFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { maybeHandleGuardianCommand, statusLineFor } from "./commands";
 import type { GuardianAction, GuardianTranscriptEntry } from "./prompt";
 import { GuardianReviewError } from "./review";
@@ -6,10 +7,16 @@ import type { GuardianMode } from "./state";
 
 const YOLO_DEBUG_LOG = "/tmp/guardian-debug.log";
 
+// Stable per-process prefix so concurrent opencode sessions are easy to
+// distinguish when they all append to the same shared log file.
+const INSTANCE_ID = randomBytes(3).toString("hex");
+const PROCESS_PID = process.pid;
+const PROCESS_CWD = process.cwd();
+
 function guardianLog(...args: unknown[]) {
   try {
     const line =
-      `${new Date().toISOString()} [GUARDIAN] ` +
+      `${new Date().toISOString()} [GUARDIAN pid=${PROCESS_PID} inst=${INSTANCE_ID}] ` +
       args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ") +
       "\n";
     appendFileSync(YOLO_DEBUG_LOG, line);
@@ -203,7 +210,20 @@ export async function createGuardianHooks(
   deps: GuardianRuntimeDeps,
 ): Promise<Hooks> {
   let mode = await deps.readMode();
-  guardianLog("plugin loaded, mode:", mode);
+  guardianLog(
+    "[PLUGIN-LOAD] mode=",
+    mode,
+    "cwd=",
+    PROCESS_CWD,
+    "guardian_model=",
+    options.guardianModel ? `${options.guardianModel.providerID}/${options.guardianModel.modelID}` : "(default)",
+    "timeoutMs=",
+    options.timeoutMs ?? 90_000,
+    "max_consecutive_denials=",
+    options.maxConsecutiveDenials ?? DEFAULT_MAX_CONSECUTIVE_DENIALS,
+    "max_recent_denials=",
+    options.maxRecentDenials ?? DEFAULT_MAX_RECENT_DENIALS,
+  );
 
   const transcriptCacheLimit = options.transcriptCacheLimit ?? DEFAULT_TRANSCRIPT_CACHE_LIMIT;
   const maxConsecutiveDenials = options.maxConsecutiveDenials ?? DEFAULT_MAX_CONSECUTIVE_DENIALS;
@@ -227,17 +247,46 @@ export async function createGuardianHooks(
       const isActiveCommand = activeGuardianCommandSessions.has(input.sessionID);
       if (isActiveCommand && input.type !== "question") {
         output.status = "deny";
-        guardianLog("permission.ask: deny tool while /guardian command active", input.type);
+        guardianLog(
+          "[DENY-LOCAL] session=",
+          input.sessionID,
+          "type=",
+          input.type,
+          "reason=tool-blocked-during-/guardian-command",
+          "patterns=",
+          JSON.stringify(patterns),
+        );
         return;
       }
       if (isYoloLike && input.type === "bash") {
         output.status = "deny";
-        guardianLog("permission.ask: deny bash guardian", patterns.join(","));
+        guardianLog(
+          "[DENY-LOCAL] session=",
+          input.sessionID,
+          "type=bash",
+          "reason=bash-invokes-guardian-binary",
+          "patterns=",
+          JSON.stringify(patterns),
+        );
         return;
       }
 
-      if (mode === "user") return;
       if (input.type === "question") return;
+
+      // Bypass when guardian mode is `user` — log explicitly so we can tell
+      // from the log whether guardian was even consulted for this request.
+      if (mode === "user") {
+        guardianLog(
+          "[ASK-USER] session=",
+          input.sessionID,
+          "type=",
+          input.type,
+          "reason=mode-is-user (guardian bypassed)",
+          "patterns=",
+          JSON.stringify(patterns),
+        );
+        return;
+      }
 
       const action = actionFromPermission(input);
       // key the circuit breaker by session — a "turn" in OpenCode is the
@@ -248,18 +297,28 @@ export async function createGuardianHooks(
       // If this session is already in tripped state, hand control back to
       // the user without spending a guardian review.
       if (circuitBreaker.isTripped(turnID)) {
-        guardianLog("permission.ask: session already tripped, falling back to user");
+        guardianLog(
+          "[ASK-USER] session=",
+          turnID,
+          "type=",
+          input.type,
+          "reason=circuit-breaker-tripped (guardian bypassed)",
+          "patterns=",
+          JSON.stringify(patterns),
+        );
         return;
       }
 
       const transcript = await deps.loadTranscript(input.sessionID, transcriptCacheLimit);
       guardianLog(
-        "permission.ask: reviewing",
+        "[REVIEW] session=",
+        turnID,
+        "type=",
         action.permission,
         "patterns=",
         JSON.stringify(patterns),
-        "turn=",
-        turnID,
+        "transcript_entries=",
+        transcript.length,
       );
 
       try {
@@ -268,20 +327,21 @@ export async function createGuardianHooks(
           result as GuardianAction & { __decision: import("./prompt").GuardianAssessment }
         ).__decision;
 
-        guardianLog(
-          "guardian decision:",
-          decision.outcome,
-          "risk=",
-          decision.risk_level,
-          "auth=",
-          decision.user_authorization,
-          "rationale=",
-          decision.rationale.slice(0, 120),
-        );
-
         if (decision.outcome === "allow") {
           circuitBreaker.recordAllow(turnID);
           output.status = "allow";
+          guardianLog(
+            "[ALLOW] session=",
+            turnID,
+            "type=",
+            action.permission,
+            "risk=",
+            decision.risk_level,
+            "auth=",
+            decision.user_authorization,
+            "rationale=",
+            decision.rationale.slice(0, 200),
+          );
         } else {
           const breaker = circuitBreaker.recordDeny(turnID, {
             maxConsecutive: maxConsecutiveDenials,
@@ -290,22 +350,66 @@ export async function createGuardianHooks(
           });
           if (breaker.tripped && fallbackOnCircuitBreak) {
             guardianLog(
-              "circuit breaker tripped:",
+              "[ASK-USER] session=",
+              turnID,
+              "type=",
+              action.permission,
+              "risk=",
+              decision.risk_level,
+              "auth=",
+              decision.user_authorization,
+              "reason=circuit-breaker-tripped",
+              "consecutive_denials=",
               breaker.consecutiveDenials,
-              "consecutive,",
+              "recent_denials=",
               breaker.recentDenials,
-              "recent — falling back to user",
+              "rationale=",
+              decision.rationale.slice(0, 200),
             );
             // leave output.status as-is (i.e. "ask") so the user decides
             return;
           }
           output.status = "deny";
+          guardianLog(
+            "[DENY] session=",
+            turnID,
+            "type=",
+            action.permission,
+            "risk=",
+            decision.risk_level,
+            "auth=",
+            decision.user_authorization,
+            "consecutive_denials=",
+            breaker.consecutiveDenials,
+            "recent_denials=",
+            breaker.recentDenials,
+            "rationale=",
+            decision.rationale.slice(0, 200),
+          );
         }
       } catch (err) {
         if (err instanceof GuardianReviewError) {
-          guardianLog("guardian review error:", err.kind, err.message, "— falling back to user");
+          guardianLog(
+            "[ASK-USER] session=",
+            turnID,
+            "type=",
+            action.permission,
+            "reason=guardian-review-failed",
+            "error_kind=",
+            err.kind,
+            "error=",
+            err.message,
+          );
         } else {
-          guardianLog("guardian review error (unknown):", String(err), "— falling back to user");
+          guardianLog(
+            "[ASK-USER] session=",
+            turnID,
+            "type=",
+            action.permission,
+            "reason=guardian-review-threw",
+            "error=",
+            String(err),
+          );
         }
         // fail-open to user: don't override output.status, let the user decide
       }
@@ -316,21 +420,15 @@ export async function createGuardianHooks(
       if (!e || typeof e.type !== "string") return;
       if (e.type === "session.idle") {
         const sid = e.properties?.sessionID;
-        if (typeof sid === "string") recordSessionIdle(sid);
+        if (typeof sid === "string") {
+          guardianLog("[SESSION-IDLE] session=", sid, "circuit_breaker_cleared=true");
+          recordSessionIdle(sid);
+        }
       }
     },
 
     "command.execute.before": async (input, output) => {
-      guardianLog(
-        "command.execute.before fired:",
-        input.command,
-        "args=",
-        JSON.stringify(input.arguments),
-      );
-      if (input.command !== GUARDIAN_COMMAND_NAME) {
-        guardianLog("command.execute.before: ignoring non-guardian command");
-        return;
-      }
+      if (input.command !== GUARDIAN_COMMAND_NAME) return;
       activeGuardianCommandSessions.add(input.sessionID);
 
       const args = input.arguments.trim().toLowerCase();
@@ -348,6 +446,15 @@ export async function createGuardianHooks(
         });
         if (result.handled && result.mode) {
           mode = result.mode;
+          guardianLog(
+            "[MODE-CHANGE] session=",
+            input.sessionID,
+            "via=command",
+            "new_mode=",
+            result.mode,
+            "args=",
+            JSON.stringify(input.arguments),
+          );
         }
         text =
           result.handled && result.mode
@@ -360,7 +467,15 @@ export async function createGuardianHooks(
       // visible to it.
       output.parts.length = 0;
       output.parts.push({ type: "text", text });
-      guardianLog("command.execute.before: wrote parts text:", text.slice(0, 80));
+      guardianLog(
+        "[CMD] session=",
+        input.sessionID,
+        "command=/guardian",
+        "args=",
+        JSON.stringify(input.arguments),
+        "response=",
+        text.slice(0, 120),
+      );
     },
 
     "chat.message": async (_input, output) => {
@@ -377,13 +492,28 @@ export async function createGuardianHooks(
       });
       if (result.handled && result.mode) {
         mode = result.mode;
-        guardianLog("chat.message updated mode to:", mode);
+        guardianLog(
+          "[MODE-CHANGE] session=",
+          output.message?.sessionID ?? "(unknown)",
+          "via=chat",
+          "new_mode=",
+          result.mode,
+          "trigger=",
+          JSON.stringify(text.slice(0, 80)),
+        );
       }
     },
 
     "tool.execute.before": async (input, output) => {
       if (!activeGuardianCommandSessions.has(input.sessionID)) return;
       if (input.tool !== "bash") return;
+      guardianLog(
+        "[NOOP-BASH] session=",
+        input.sessionID,
+        "reason=/guardian-command-active",
+        "original_args=",
+        JSON.stringify(output.args ?? {}).slice(0, 200),
+      );
       output.args = {
         ...(output.args ?? {}),
         command: ":",
