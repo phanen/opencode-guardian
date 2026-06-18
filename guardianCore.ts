@@ -321,32 +321,46 @@ export async function createGuardianHooks(
     },
 
     "command.execute.before": async (input, output) => {
-      if (input.command !== GUARDIAN_COMMAND_NAME) return;
+      guardianLog(
+        "command.execute.before fired:",
+        input.command,
+        "args=",
+        JSON.stringify(input.arguments),
+      );
+      if (input.command !== GUARDIAN_COMMAND_NAME) {
+        guardianLog("command.execute.before: ignoring non-guardian command");
+        return;
+      }
       activeGuardianCommandSessions.add(input.sessionID);
 
       const args = input.arguments.trim().toLowerCase();
+      let text: string;
       if (args === "start" || args === "kickoff") {
-        const msg =
+        text =
           mode === "auto_review"
             ? "Guardian mode is auto_review. Approval requests will be LLM-reviewed automatically."
             : "Guardian mode is user. Switch with /guardian on to enable auto-review.";
-        output.parts = [{ type: "text", text: msg }];
-        return;
+      } else {
+        const commandText = args ? `/guardian ${args}` : "/guardian";
+        const result = await maybeHandleGuardianCommand(commandText, {
+          readMode: deps.readMode,
+          writeMode: deps.writeMode,
+        });
+        if (result.handled && result.mode) {
+          mode = result.mode;
+        }
+        text =
+          result.handled && result.mode
+            ? statusLineFor(result.mode)
+            : `Unknown /guardian argument: ${args || "(none)"}`;
       }
-
-      const commandText = args ? `/guardian ${args}` : "/guardian";
-      const result = await maybeHandleGuardianCommand(commandText, {
-        readMode: deps.readMode,
-        writeMode: deps.writeMode,
-      });
-      if (result.handled && result.mode) {
-        mode = result.mode;
-      }
-      const text =
-        result.handled && result.mode
-          ? statusLineFor(result.mode)
-          : `Unknown /guardian argument: ${args || "(none)"}`;
-      output.parts = [{ type: "text", text }];
+      // Mutate the existing parts array in place rather than reassigning
+      // output.parts — OpenCode's command.execute.before consumer reads
+      // `parts` from its closure scope, so a reassignment would not be
+      // visible to it.
+      output.parts.length = 0;
+      output.parts.push({ type: "text", text });
+      guardianLog("command.execute.before: wrote parts text:", text.slice(0, 80));
     },
 
     "chat.message": async (_input, output) => {
