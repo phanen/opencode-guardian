@@ -1,7 +1,7 @@
 import { appendFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { maybeHandleGuardianCommand, statusLineFor } from "./commands";
-import type { GuardianAction, GuardianTranscriptEntry } from "./prompt";
+import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
 import { GuardianReviewError } from "./review";
 import type { GuardianMode } from "./state";
 
@@ -39,6 +39,8 @@ export interface GuardianOptions {
   debugLogPath?: string;
 }
 
+export type GuardianReply = "once" | "always" | "reject";
+
 export interface GuardianRuntimeDeps {
   readMode: () => Promise<GuardianMode>;
   writeMode: (mode: GuardianMode) => Promise<void>;
@@ -47,28 +49,32 @@ export interface GuardianRuntimeDeps {
     action: GuardianAction,
     transcript: GuardianTranscriptEntry[],
     signal?: AbortSignal,
-  ) => Promise<GuardianAction & { __decision: import("./prompt").GuardianAssessment }>;
-  isPermissionAllowedByUserRule?: (input: PermissionInput) => boolean;
+  ) => Promise<GuardianAssessment>;
+  /**
+   * Reply to a pending permission request. The implementation should swallow
+   * "not found" errors (the user may have already responded manually before
+   * guardian finished) and surface other failures.
+   */
+  replyPermission: (requestID: string, reply: GuardianReply, message?: string) => Promise<void>;
 }
 
-export interface PermissionInput {
-  type: string;
-  pattern?: string | string[];
+/**
+ * Shape of the `permission.asked` event published by opencode's
+ * Permission.ask service. Mirrors `PermissionV1.Request` in the opencode
+ * source — kept as a structural type so this plugin does not depend on the
+ * internal SDK package.
+ */
+export interface PermissionAskedRequest {
+  id: string;
   sessionID: string;
+  permission: string;
+  patterns: string[];
   metadata?: Record<string, unknown>;
-  patterns?: string[];
   always?: string[];
-  callID?: string;
-  messageID?: string;
-  id?: string;
-}
-
-export interface PermissionOutput {
-  status: "ask" | "deny" | "allow";
+  tool?: { messageID: string; callID: string };
 }
 
 export interface Hooks {
-  "permission.ask"?: (input: PermissionInput, output: PermissionOutput) => Promise<void>;
   event?: (input: { event: unknown }) => Promise<void>;
   "command.execute.before"?: (
     input: { command: string; sessionID: string; arguments: string },
@@ -101,18 +107,10 @@ const GUARDIAN_DENIAL_INSTRUCTIONS =
   "or if the user explicitly approves the action after being informed of the risk. " +
   "Otherwise, stop and request user input.";
 
-const GUARDIAN_TIMEOUT_INSTRUCTIONS =
-  "The automatic permission approval review did not finish before its deadline. " +
-  "Do not assume the action is unsafe based on the timeout alone. " +
-  "You may retry once, or ask the user for guidance or explicit approval.";
-
 const GUARDIAN_COMMAND_NAME = "guardian";
 
-function normalizePatterns(input: PermissionInput): string[] {
-  const raw: string[] = [];
-  if (Array.isArray(input.pattern)) raw.push(...input.pattern);
-  if (typeof input.pattern === "string") raw.push(input.pattern);
-  if (Array.isArray(input.patterns)) raw.push(...input.patterns);
+function normalizePatterns(patterns: string[] | undefined): string[] {
+  const raw = patterns ?? [];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const p of raw) {
@@ -124,29 +122,21 @@ function normalizePatterns(input: PermissionInput): string[] {
   return out;
 }
 
-function actionFromPermission(input: PermissionInput): GuardianAction {
-  const patterns = normalizePatterns(input);
+function actionFromPermission(req: PermissionAskedRequest): GuardianAction {
+  const patterns = normalizePatterns(req.patterns);
   return {
-    id: input.id ?? input.callID ?? `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    permission: input.type,
+    id: req.id,
+    permission: req.permission,
     patterns,
-    metadata: input.metadata ?? {},
-    always: input.always ?? [],
-    sessionID: input.sessionID,
-    tool:
-      input.callID && input.messageID
-        ? { callID: input.callID, messageID: input.messageID }
-        : undefined,
+    metadata: req.metadata ?? {},
+    always: req.always ?? [],
+    sessionID: req.sessionID,
+    tool: req.tool,
   };
 }
 
 function isGuardianCommandPattern(patterns: string[]): boolean {
   return patterns.some((p) => /(^|\s)\/?guardian(\s|$)/.test(p));
-}
-
-function denialMessage(rationale: string, source: "agent" | "timeout"): string {
-  if (source === "timeout") return GUARDIAN_TIMEOUT_INSTRUCTIONS;
-  return `This action was rejected by the Guardian auto-review.\nReason: ${rationale.trim()}\n${GUARDIAN_DENIAL_INSTRUCTIONS}`;
 }
 
 interface CircuitBreakerTurn {
@@ -198,11 +188,6 @@ class CircuitBreaker {
   clearTurn(turnID: string): void {
     this.turns.delete(turnID);
   }
-
-  cleanup(maxAgeMs: number, now: number): void {
-    void maxAgeMs;
-    void now;
-  }
 }
 
 export async function createGuardianHooks(
@@ -235,193 +220,224 @@ export async function createGuardianHooks(
   const circuitBreaker = new CircuitBreaker();
   const activeGuardianCommandSessions = new Set<string>();
 
-  function recordSessionIdle(sessionID: string) {
-    circuitBreaker.clearTurn(sessionID);
+  async function handlePermissionAsked(req: PermissionAskedRequest): Promise<void> {
+    if (req.permission === "question") return;
+
+    const patterns = normalizePatterns(req.patterns);
+
+    // Block bash invocations of `guardian` regardless of mode.
+    if (isGuardianCommandPattern(patterns) && req.permission === "bash") {
+      guardianLog(
+        "[DENY-LOCAL] request=",
+        req.id,
+        "session=",
+        req.sessionID,
+        "type=bash",
+        "reason=bash-invokes-guardian-binary",
+        "patterns=",
+        JSON.stringify(patterns),
+      );
+      try {
+        await deps.replyPermission(req.id, "reject", "bash invocation of guardian is not allowed");
+      } catch (err) {
+        guardianLog("[DENY-LOCAL] reply failed:", req.id, String(err));
+      }
+      return;
+    }
+
+    // Block any tool call during an in-flight /guardian command for this session.
+    if (activeGuardianCommandSessions.has(req.sessionID)) {
+      guardianLog(
+        "[DENY-LOCAL] request=",
+        req.id,
+        "session=",
+        req.sessionID,
+        "type=",
+        req.permission,
+        "reason=tool-blocked-during-/guardian-command",
+        "patterns=",
+        JSON.stringify(patterns),
+      );
+      try {
+        await deps.replyPermission(
+          req.id,
+          "reject",
+          "tool blocked while /guardian command is in flight",
+        );
+      } catch (err) {
+        guardianLog("[DENY-LOCAL] reply failed:", req.id, String(err));
+      }
+      return;
+    }
+
+    // In `user` mode, do not intercept — let opencode show the dialog.
+    if (mode === "user") {
+      guardianLog(
+        "[ASK-USER] request=",
+        req.id,
+        "session=",
+        req.sessionID,
+        "type=",
+        req.permission,
+        "reason=mode-is-user (guardian bypassed)",
+        "patterns=",
+        JSON.stringify(patterns),
+      );
+      return;
+    }
+
+    // Circuit breaker tripped for this session — hand control to the user.
+    if (circuitBreaker.isTripped(req.sessionID)) {
+      guardianLog(
+        "[ASK-USER] request=",
+        req.id,
+        "session=",
+        req.sessionID,
+        "type=",
+        req.permission,
+        "reason=circuit-breaker-tripped (guardian bypassed)",
+        "patterns=",
+        JSON.stringify(patterns),
+      );
+      return;
+    }
+
+    const transcript = await deps.loadTranscript(req.sessionID, transcriptCacheLimit);
+    const action = actionFromPermission(req);
+    guardianLog(
+      "[REVIEW] request=",
+      req.id,
+      "session=",
+      req.sessionID,
+      "type=",
+      action.permission,
+      "patterns=",
+      JSON.stringify(patterns),
+      "transcript_entries=",
+      transcript.length,
+    );
+
+    let assessment: GuardianAssessment;
+    try {
+      assessment = await deps.runReview(action, transcript);
+    } catch (err) {
+      // Fail-open: do not reply, leave the dialog to the user.
+      const kind = err instanceof GuardianReviewError ? err.kind : "unknown";
+      const msg = err instanceof Error ? err.message : String(err);
+      guardianLog(
+        "[ASK-USER] request=",
+        req.id,
+        "session=",
+        req.sessionID,
+        "type=",
+        action.permission,
+        "reason=guardian-review-failed",
+        "error_kind=",
+        kind,
+        "error=",
+        msg,
+      );
+      return;
+    }
+
+    if (assessment.outcome === "allow") {
+      circuitBreaker.recordAllow(req.sessionID);
+      guardianLog(
+        "[ALLOW] request=",
+        req.id,
+        "session=",
+        req.sessionID,
+        "type=",
+        action.permission,
+        "risk=",
+        assessment.risk_level,
+        "auth=",
+        assessment.user_authorization,
+        "rationale=",
+        assessment.rationale.slice(0, 200),
+      );
+      try {
+        await deps.replyPermission(req.id, "once");
+      } catch (err) {
+        guardianLog("[ALLOW] reply failed:", req.id, String(err));
+      }
+      return;
+    }
+
+    // Deny path
+    const breaker = circuitBreaker.recordDeny(req.sessionID, {
+      maxConsecutive: maxConsecutiveDenials,
+      maxRecent: maxRecentDenials,
+      window: recentDenialWindow,
+    });
+
+    if (breaker.tripped && fallbackOnCircuitBreak) {
+      guardianLog(
+        "[ASK-USER] request=",
+        req.id,
+        "session=",
+        req.sessionID,
+        "type=",
+        action.permission,
+        "risk=",
+        assessment.risk_level,
+        "auth=",
+        assessment.user_authorization,
+        "reason=circuit-breaker-tripped",
+        "consecutive_denials=",
+        breaker.consecutiveDenials,
+        "recent_denials=",
+        breaker.recentDenials,
+        "rationale=",
+        assessment.rationale.slice(0, 200),
+      );
+      // Do not reply — opencode's TUI dialog remains for the user to decide.
+      return;
+    }
+
+    const denialMessage = `${assessment.rationale.trim()}\n${GUARDIAN_DENIAL_INSTRUCTIONS}`;
+    guardianLog(
+      "[DENY] request=",
+      req.id,
+      "session=",
+      req.sessionID,
+      "type=",
+      action.permission,
+      "risk=",
+      assessment.risk_level,
+      "auth=",
+      assessment.user_authorization,
+      "consecutive_denials=",
+      breaker.consecutiveDenials,
+      "recent_denials=",
+      breaker.recentDenials,
+      "rationale=",
+      assessment.rationale.slice(0, 200),
+    );
+    try {
+      await deps.replyPermission(req.id, "reject", denialMessage);
+    } catch (err) {
+      guardianLog("[DENY] reply failed:", req.id, String(err));
+    }
   }
 
   return {
-    "permission.ask": async (input, output) => {
-      // Always block bash invocations of `guardian` — it isn't a real binary.
-      const patterns = normalizePatterns(input);
-      const isYoloLike = isGuardianCommandPattern(patterns);
-      const isActiveCommand = activeGuardianCommandSessions.has(input.sessionID);
-      if (isActiveCommand && input.type !== "question") {
-        output.status = "deny";
-        guardianLog(
-          "[DENY-LOCAL] session=",
-          input.sessionID,
-          "type=",
-          input.type,
-          "reason=tool-blocked-during-/guardian-command",
-          "patterns=",
-          JSON.stringify(patterns),
-        );
-        return;
-      }
-      if (isYoloLike && input.type === "bash") {
-        output.status = "deny";
-        guardianLog(
-          "[DENY-LOCAL] session=",
-          input.sessionID,
-          "type=bash",
-          "reason=bash-invokes-guardian-binary",
-          "patterns=",
-          JSON.stringify(patterns),
-        );
-        return;
-      }
-
-      if (input.type === "question") return;
-
-      // Bypass when guardian mode is `user` — log explicitly so we can tell
-      // from the log whether guardian was even consulted for this request.
-      if (mode === "user") {
-        guardianLog(
-          "[ASK-USER] session=",
-          input.sessionID,
-          "type=",
-          input.type,
-          "reason=mode-is-user (guardian bypassed)",
-          "patterns=",
-          JSON.stringify(patterns),
-        );
-        return;
-      }
-
-      const action = actionFromPermission(input);
-      // key the circuit breaker by session — a "turn" in OpenCode is the
-      // whole user-prompt + agent-response cycle, so consecutive denials
-      // across tool calls in the same response should trip together.
-      const turnID = action.sessionID;
-
-      // If this session is already in tripped state, hand control back to
-      // the user without spending a guardian review.
-      if (circuitBreaker.isTripped(turnID)) {
-        guardianLog(
-          "[ASK-USER] session=",
-          turnID,
-          "type=",
-          input.type,
-          "reason=circuit-breaker-tripped (guardian bypassed)",
-          "patterns=",
-          JSON.stringify(patterns),
-        );
-        return;
-      }
-
-      const transcript = await deps.loadTranscript(input.sessionID, transcriptCacheLimit);
-      guardianLog(
-        "[REVIEW] session=",
-        turnID,
-        "type=",
-        action.permission,
-        "patterns=",
-        JSON.stringify(patterns),
-        "transcript_entries=",
-        transcript.length,
-      );
-
-      try {
-        const result = await deps.runReview(action, transcript);
-        const decision = (
-          result as GuardianAction & { __decision: import("./prompt").GuardianAssessment }
-        ).__decision;
-
-        if (decision.outcome === "allow") {
-          circuitBreaker.recordAllow(turnID);
-          output.status = "allow";
-          guardianLog(
-            "[ALLOW] session=",
-            turnID,
-            "type=",
-            action.permission,
-            "risk=",
-            decision.risk_level,
-            "auth=",
-            decision.user_authorization,
-            "rationale=",
-            decision.rationale.slice(0, 200),
-          );
-        } else {
-          const breaker = circuitBreaker.recordDeny(turnID, {
-            maxConsecutive: maxConsecutiveDenials,
-            maxRecent: maxRecentDenials,
-            window: recentDenialWindow,
-          });
-          if (breaker.tripped && fallbackOnCircuitBreak) {
-            guardianLog(
-              "[ASK-USER] session=",
-              turnID,
-              "type=",
-              action.permission,
-              "risk=",
-              decision.risk_level,
-              "auth=",
-              decision.user_authorization,
-              "reason=circuit-breaker-tripped",
-              "consecutive_denials=",
-              breaker.consecutiveDenials,
-              "recent_denials=",
-              breaker.recentDenials,
-              "rationale=",
-              decision.rationale.slice(0, 200),
-            );
-            // leave output.status as-is (i.e. "ask") so the user decides
-            return;
-          }
-          output.status = "deny";
-          guardianLog(
-            "[DENY] session=",
-            turnID,
-            "type=",
-            action.permission,
-            "risk=",
-            decision.risk_level,
-            "auth=",
-            decision.user_authorization,
-            "consecutive_denials=",
-            breaker.consecutiveDenials,
-            "recent_denials=",
-            breaker.recentDenials,
-            "rationale=",
-            decision.rationale.slice(0, 200),
-          );
-        }
-      } catch (err) {
-        if (err instanceof GuardianReviewError) {
-          guardianLog(
-            "[ASK-USER] session=",
-            turnID,
-            "type=",
-            action.permission,
-            "reason=guardian-review-failed",
-            "error_kind=",
-            err.kind,
-            "error=",
-            err.message,
-          );
-        } else {
-          guardianLog(
-            "[ASK-USER] session=",
-            turnID,
-            "type=",
-            action.permission,
-            "reason=guardian-review-threw",
-            "error=",
-            String(err),
-          );
-        }
-        // fail-open to user: don't override output.status, let the user decide
-      }
-    },
-
     event: async ({ event }) => {
       const e = event as { type?: string; properties?: any };
       if (!e || typeof e.type !== "string") return;
+
+      if (e.type === "permission.asked") {
+        const req = e.properties as PermissionAskedRequest | undefined;
+        if (!req || typeof req.id !== "string" || typeof req.sessionID !== "string") return;
+        await handlePermissionAsked(req);
+        return;
+      }
+
       if (e.type === "session.idle") {
         const sid = e.properties?.sessionID;
         if (typeof sid === "string") {
           const wasActive = activeGuardianCommandSessions.delete(sid);
+          circuitBreaker.clearTurn(sid);
           guardianLog(
             "[SESSION-IDLE] session=",
             sid,
@@ -429,7 +445,6 @@ export async function createGuardianHooks(
             "active_command_cleared=",
             wasActive,
           );
-          recordSessionIdle(sid);
         }
       }
     },
@@ -487,10 +502,7 @@ export async function createGuardianHooks(
       } finally {
         // /guardian is a synchronous text-only command — the entire body
         // lives in this hook. Clear the active flag so subsequent tool
-        // calls in this session are not silently denied or replaced with
-        // a no-op. Without this, the session stays "active" forever and
-        // every bash call gets [DENY-LOCAL] / [NOOP-BASH] for the rest
-        // of the session's life.
+        // calls in this session are not silently denied.
         activeGuardianCommandSessions.delete(input.sessionID);
       }
     },
@@ -545,5 +557,4 @@ export const __test_internals = {
   actionFromPermission,
   normalizePatterns,
   isGuardianCommandPattern,
-  denialMessage,
 };

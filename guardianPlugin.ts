@@ -2,9 +2,10 @@ import path from "node:path";
 import {
   createGuardianHooks,
   type GuardianOptions,
+  type GuardianReply,
   type GuardianRuntimeDeps,
 } from "./guardianCore";
-import type { GuardianAction, GuardianTranscriptEntry } from "./prompt";
+import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
 import { runGuardianReview } from "./review";
 import { type GuardianMode, readMode, writeMode } from "./state";
 
@@ -29,6 +30,12 @@ export type GuardianPluginOptions = GuardianOptions & {
 function resolveStatePath(ctx: PluginCtx): string {
   const root = ctx.directory || ctx.worktree;
   return path.join(root, ".guardian.json");
+}
+
+function resolveServerUrl(ctx: PluginCtx): string {
+  if (!ctx.serverUrl) return "http://localhost:4096";
+  if (typeof ctx.serverUrl === "string") return ctx.serverUrl;
+  return ctx.serverUrl.toString().replace(/\/+$/, "");
 }
 
 function textFromParts(parts: Array<{ type?: string; text?: string }> = []): string {
@@ -67,6 +74,33 @@ async function loadTranscript(
     return out;
   } catch {
     return [];
+  }
+}
+
+async function replyPermission(
+  ctx: PluginCtx,
+  requestID: string,
+  reply: GuardianReply,
+  message?: string,
+): Promise<void> {
+  const base = resolveServerUrl(ctx);
+  const url = `${base}/permission/${encodeURIComponent(requestID)}/reply`;
+  const body: { reply: GuardianReply; message?: string } = { reply };
+  if (message) body.message = message;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    // 404 means the user already responded manually — that's fine, swallow it.
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`permission.reply failed: ${res.status} ${await res.text()}`);
+    }
+  } catch (err) {
+    // Network errors and unexpected status codes are surfaced to the caller
+    // so they can be logged by the hook.
+    throw err;
   }
 }
 
@@ -119,12 +153,9 @@ export default async function GuardianPlugin(
           }
         },
       });
-      // attach decision to action so the caller can extract it without
-      // changing the runtime contract
-      return Object.assign({}, action, { __decision: assessment }) as GuardianAction & {
-        __decision: import("./prompt").GuardianAssessment;
-      };
+      return assessment;
     },
+    replyPermission: (requestID, reply, message) => replyPermission(ctx, requestID, reply, message),
   };
 
   return createGuardianHooks(options, deps);
