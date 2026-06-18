@@ -307,6 +307,37 @@ export async function createGuardianHooks(
       return;
     }
 
+    // In `dangerously_skip` mode, immediately reply "once" without LLM.
+    // This is the test branch to verify whether sync reply (no LLM latency)
+    // beats the parent-fiber interrupt in opencode. If this gets 200 from
+    // the server, the LLM is the only thing keeping auto_review from working.
+    if (mode === "dangerously_skip") {
+      guardianLog(
+        "[SKIP-SYNC] request=",
+        req.id,
+        "session=",
+        req.sessionID,
+        "type=",
+        req.permission,
+        "patterns=",
+        JSON.stringify(patterns),
+        "elapsed_ms=",
+        Date.now() - t0,
+      );
+      try {
+        await deps.replyPermission(req.sessionID, req.id, "once");
+        guardianLog(
+          "[SKIP-SYNC] reply sent request=",
+          req.id,
+          "elapsed_ms=",
+          Date.now() - t0,
+        );
+      } catch (err) {
+        guardianLog("[SKIP-SYNC] reply failed:", req.id, String(err));
+      }
+      return;
+    }
+
     // Circuit breaker tripped for this session — hand control to the user.
     if (circuitBreaker.isTripped(req.sessionID)) {
       guardianLog(

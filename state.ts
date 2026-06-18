@@ -6,14 +6,16 @@ function defaultStatePath() {
 }
 
 interface StateFile {
-  mode?: "user" | "auto_review";
+  mode?: "user" | "auto_review" | "dangerously_skip";
   updatedAt?: string;
 }
 
-export type GuardianMode = "user" | "auto_review";
+export type GuardianMode = "user" | "auto_review" | "dangerously_skip";
 
 function isGuardianMode(value: unknown): value is GuardianMode {
-  return value === "user" || value === "auto_review";
+  return (
+    value === "user" || value === "auto_review" || value === "dangerously_skip"
+  );
 }
 
 export async function readMode(

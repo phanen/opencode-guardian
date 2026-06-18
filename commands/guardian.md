@@ -1,10 +1,10 @@
 ---
 name: guardian
-description: Toggle or inspect Guardian mode (on/off/auto_review/status)
+description: Toggle or inspect Guardian mode (on/off/auto_review/skip/status)
 subtask: false
 arguments:
   - name: action
-    description: "One of: on, off, auto_review, status, toggle"
+    description: "One of: on, off, auto_review, skip, status, toggle"
     required: false
 ---
 

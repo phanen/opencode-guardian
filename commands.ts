@@ -41,6 +41,11 @@ export async function maybeHandleGuardianCommand(
     return { handled: true, mode: "user" };
   }
 
+  if (rest === "skip" || rest === "dangerously_skip" || rest === "dangerously-skip") {
+    await deps.writeMode("dangerously_skip");
+    return { handled: true, mode: "dangerously_skip" };
+  }
+
   if (rest === "status") {
     return { handled: true, mode: await deps.readMode() };
   }
@@ -49,7 +54,9 @@ export async function maybeHandleGuardianCommand(
 }
 
 export function statusLineFor(mode: GuardianMode): string {
-  return mode === "auto_review"
-    ? "Guardian mode: auto_review (LLM reviews each approval request)."
-    : "Guardian mode: user (all approvals go to the human).";
+  if (mode === "auto_review")
+    return "Guardian mode: auto_review (LLM reviews each approval request).";
+  if (mode === "dangerously_skip")
+    return "Guardian mode: dangerously_skip (all permissions auto-allowed, no LLM).";
+  return "Guardian mode: user (all approvals go to the human).";
 }

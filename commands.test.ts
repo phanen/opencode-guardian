@@ -35,6 +35,14 @@ describe("commands", () => {
     expect(r.mode).toBe("user");
   });
 
+  test("/guardian toggles from user to dangerously_skip via skip", async () => {
+    const t = makeDeps("user");
+    const r = await maybeHandleGuardianCommand("/guardian skip", t.deps);
+    expect(r.handled).toBe(true);
+    expect(r.mode).toBe("dangerously_skip");
+    expect(t.writes).toEqual(["dangerously_skip"]);
+  });
+
   test("/guardian on enables auto_review", async () => {
     const t = makeDeps("user");
     const r = await maybeHandleGuardianCommand("/guardian on", t.deps);
