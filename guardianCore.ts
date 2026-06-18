@@ -421,7 +421,14 @@ export async function createGuardianHooks(
       if (e.type === "session.idle") {
         const sid = e.properties?.sessionID;
         if (typeof sid === "string") {
-          guardianLog("[SESSION-IDLE] session=", sid, "circuit_breaker_cleared=true");
+          const wasActive = activeGuardianCommandSessions.delete(sid);
+          guardianLog(
+            "[SESSION-IDLE] session=",
+            sid,
+            "circuit_breaker_cleared=true",
+            "active_command_cleared=",
+            wasActive,
+          );
           recordSessionIdle(sid);
         }
       }
@@ -431,51 +438,61 @@ export async function createGuardianHooks(
       if (input.command !== GUARDIAN_COMMAND_NAME) return;
       activeGuardianCommandSessions.add(input.sessionID);
 
-      const args = input.arguments.trim().toLowerCase();
-      let text: string;
-      if (args === "start" || args === "kickoff") {
-        text =
-          mode === "auto_review"
-            ? "Guardian mode is auto_review. Approval requests will be LLM-reviewed automatically."
-            : "Guardian mode is user. Switch with /guardian on to enable auto-review.";
-      } else {
-        const commandText = args ? `/guardian ${args}` : "/guardian";
-        const result = await maybeHandleGuardianCommand(commandText, {
-          readMode: deps.readMode,
-          writeMode: deps.writeMode,
-        });
-        if (result.handled && result.mode) {
-          mode = result.mode;
-          guardianLog(
-            "[MODE-CHANGE] session=",
-            input.sessionID,
-            "via=command",
-            "new_mode=",
-            result.mode,
-            "args=",
-            JSON.stringify(input.arguments),
-          );
+      try {
+        const args = input.arguments.trim().toLowerCase();
+        let text: string;
+        if (args === "start" || args === "kickoff") {
+          text =
+            mode === "auto_review"
+              ? "Guardian mode is auto_review. Approval requests will be LLM-reviewed automatically."
+              : "Guardian mode is user. Switch with /guardian on to enable auto-review.";
+        } else {
+          const commandText = args ? `/guardian ${args}` : "/guardian";
+          const result = await maybeHandleGuardianCommand(commandText, {
+            readMode: deps.readMode,
+            writeMode: deps.writeMode,
+          });
+          if (result.handled && result.mode) {
+            mode = result.mode;
+            guardianLog(
+              "[MODE-CHANGE] session=",
+              input.sessionID,
+              "via=command",
+              "new_mode=",
+              result.mode,
+              "args=",
+              JSON.stringify(input.arguments),
+            );
+          }
+          text =
+            result.handled && result.mode
+              ? statusLineFor(result.mode)
+              : `Unknown /guardian argument: ${args || "(none)"}`;
         }
-        text =
-          result.handled && result.mode
-            ? statusLineFor(result.mode)
-            : `Unknown /guardian argument: ${args || "(none)"}`;
+        // Mutate the existing parts array in place rather than reassigning
+        // output.parts — OpenCode's command.execute.before consumer reads
+        // `parts` from its closure scope, so a reassignment would not be
+        // visible to it.
+        output.parts.length = 0;
+        output.parts.push({ type: "text", text });
+        guardianLog(
+          "[CMD] session=",
+          input.sessionID,
+          "command=/guardian",
+          "args=",
+          JSON.stringify(input.arguments),
+          "response=",
+          text.slice(0, 120),
+        );
+      } finally {
+        // /guardian is a synchronous text-only command — the entire body
+        // lives in this hook. Clear the active flag so subsequent tool
+        // calls in this session are not silently denied or replaced with
+        // a no-op. Without this, the session stays "active" forever and
+        // every bash call gets [DENY-LOCAL] / [NOOP-BASH] for the rest
+        // of the session's life.
+        activeGuardianCommandSessions.delete(input.sessionID);
       }
-      // Mutate the existing parts array in place rather than reassigning
-      // output.parts — OpenCode's command.execute.before consumer reads
-      // `parts` from its closure scope, so a reassignment would not be
-      // visible to it.
-      output.parts.length = 0;
-      output.parts.push({ type: "text", text });
-      guardianLog(
-        "[CMD] session=",
-        input.sessionID,
-        "command=/guardian",
-        "args=",
-        JSON.stringify(input.arguments),
-        "response=",
-        text.slice(0, 120),
-      );
     },
 
     "chat.message": async (_input, output) => {
