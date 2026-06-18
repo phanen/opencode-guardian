@@ -225,6 +225,21 @@ export async function createGuardianHooks(
 
     const patterns = normalizePatterns(req.patterns);
 
+    const t0 = Date.now();
+    guardianLog(
+      "[PERMISSION-EVENT-RECEIVED]",
+      "t=",
+      new Date(t0).toISOString(),
+      "request=",
+      req.id,
+      "session=",
+      req.sessionID,
+      "type=",
+      req.permission,
+      "patterns=",
+      JSON.stringify(patterns),
+    );
+
     // Block bash invocations of `guardian` regardless of mode.
     if (isGuardianCommandPattern(patterns) && req.permission === "bash") {
       guardianLog(
@@ -353,6 +368,8 @@ export async function createGuardianHooks(
         assessment.risk_level,
         "auth=",
         assessment.user_authorization,
+        "elapsed_ms=",
+        Date.now() - t0,
         "rationale=",
         assessment.rationale.slice(0, 200),
       );
@@ -407,6 +424,8 @@ export async function createGuardianHooks(
       assessment.risk_level,
       "auth=",
       assessment.user_authorization,
+      "elapsed_ms=",
+      Date.now() - t0,
       "consecutive_denials=",
       breaker.consecutiveDenials,
       "recent_denials=",

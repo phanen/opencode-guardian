@@ -21,6 +21,7 @@ interface PluginCtx {
   directory: string;
   worktree: string;
   serverUrl?: string | URL;
+  project?: { workspaceID?: string };
 }
 
 export type GuardianPluginOptions = GuardianOptions & {
@@ -84,22 +85,45 @@ async function replyPermission(
   message?: string,
 ): Promise<void> {
   const base = resolveServerUrl(ctx);
-  const url = `${base}/permission/${encodeURIComponent(requestID)}/reply`;
+  const params = new URLSearchParams();
+  if (ctx.directory) params.set("directory", ctx.directory);
+  if (ctx.project?.workspaceID) params.set("workspace", ctx.project.workspaceID);
+  const qs = params.toString();
+  const url = `${base}/permission/${encodeURIComponent(requestID)}/reply${qs ? `?${qs}` : ""}`;
   const body: { reply: GuardianReply; message?: string } = { reply };
   if (message) body.message = message;
+
+  // Diagnostic: write the URL we are about to hit and the response status to
+  // the guardian debug log so we can confirm the HTTP reply is actually
+  // reaching the opencode server.
+  const { appendFileSync } = await import("node:fs");
+  const log = (msg: string) => {
+    try {
+      appendFileSync(
+        "/tmp/guardian-debug.log",
+        `${new Date().toISOString()} [GUARDIAN-REPLY] ${msg}\n`,
+      );
+    } catch {}
+  };
+
   try {
+    log(`POST ${url} body=${JSON.stringify(body)}`);
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    // 404 means the user already responded manually — that's fine, swallow it.
-    if (!res.ok && res.status !== 404) {
-      throw new Error(`permission.reply failed: ${res.status} ${await res.text()}`);
+    const text = await res.text();
+    log(`response status=${res.status} ok=${res.ok} body=${text.slice(0, 300)}`);
+    if (res.status === 404) {
+      // request already resolved by the user or another path — benign
+      return;
+    }
+    if (!res.ok) {
+      throw new Error(`permission.reply failed: ${res.status} ${text}`);
     }
   } catch (err) {
-    // Network errors and unexpected status codes are surfaced to the caller
-    // so they can be logged by the hook.
+    log(`fetch error: ${(err as Error).message}`);
     throw err;
   }
 }
