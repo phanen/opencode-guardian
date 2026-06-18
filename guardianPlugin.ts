@@ -34,9 +34,22 @@ function resolveStatePath(ctx: PluginCtx): string {
 }
 
 function resolveServerUrl(ctx: PluginCtx): string {
-  if (!ctx.serverUrl) return "http://localhost:4096";
-  if (typeof ctx.serverUrl === "string") return ctx.serverUrl;
-  return ctx.serverUrl.toString().replace(/\/+$/, "");
+  const { appendFileSync } = require("node:fs") as typeof import("node:fs");
+  const url = (() => {
+    if (!ctx.serverUrl) return "http://localhost:4096";
+    if (typeof ctx.serverUrl === "string") return ctx.serverUrl;
+    return ctx.serverUrl.toString().replace(/\/+$/, "");
+  })();
+  // Diagnostic: log the URL resolution so we can verify we hit the right server
+  try {
+    appendFileSync(
+      "/tmp/guardian-debug.log",
+      `${new Date().toISOString()} [GUARDIAN-REPLY] resolveServerUrl ctx_serverUrl=${
+        ctx.serverUrl ? (typeof ctx.serverUrl === "string" ? ctx.serverUrl : ctx.serverUrl.toString()) : "(undefined)"
+      } resolved=${url}\n`,
+    );
+  } catch {}
+  return url;
 }
 
 function textFromParts(parts: Array<{ type?: string; text?: string }> = []): string {
