@@ -2,9 +2,9 @@ import type { Hooks } from "@opencode-ai/plugin";
 import type { Part, TextPart } from "@opencode-ai/sdk";
 import { maybeHandleGuardianCommand, statusLineFor } from "./commands";
 import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
-import { GuardianReviewError } from "./review";
+import { GuardianReviewError, type GuardianQuestionDecision } from "./review";
 import type { GuardianMode } from "./state";
-import type { ModelRef, PermissionAskedRequest, RawEvent } from "./types";
+import type { ModelRef, PermissionAskedRequest, QuestionAskedRequest, RawEvent } from "./types";
 // `debugLog` is the runtime target of the $log! macro below; it is
 // referenced by the expanded output and must stay imported.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -12,7 +12,7 @@ import { debugLog } from "./utils";
 import { $log } from "./debugLog.macro";
 
 // Re-export for plugin consumers.
-export type { PermissionAskedRequest } from "./types";
+export type { PermissionAskedRequest, QuestionAskedRequest } from "./types";
 
 const PROCESS_CWD = process.cwd();
 
@@ -47,6 +47,28 @@ export interface GuardianRuntimeDeps {
    * guardian finished) and surface other failures.
    */
   replyPermission: (sessionID: string, requestID: string, reply: GuardianReply, message?: string) => Promise<void>;
+  /**
+   * Submit answers to a pending question request. Swallow 404s like
+   * `replyPermission` does. The plugin implementation should route through
+   * the in-process SDK client, not Node fetch.
+   */
+  replyQuestion: (sessionID: string, requestID: string, answers: string[][]) => Promise<void>;
+  /**
+   * Reject a pending question request — dismisses the dialog and signals
+   * the tool that the user declined to answer. Swallow 404s.
+   */
+  rejectQuestion: (sessionID: string, requestID: string) => Promise<void>;
+  /**
+   * Run an LLM review of a question. Returns either an `answer` decision
+   * (one answer-array per question) or `reject` to dismiss the request.
+   * On failure (timeout, parse error, transport), throw a `GuardianReviewError`
+   * so the caller can fall back to the user.
+   */
+  runQuestionReview: (
+    request: QuestionAskedRequest,
+    transcript: GuardianTranscriptEntry[],
+    signal?: AbortSignal,
+  ) => Promise<GuardianQuestionDecision>;
 }
 
 const DEFAULT_TRANSCRIPT_CACHE_LIMIT = 40;
@@ -331,6 +353,85 @@ export async function createGuardianHooks(options: GuardianOptions, deps: Guardi
     }
   }
 
+  async function handleQuestionAsked(req: QuestionAskedRequest): Promise<void> {
+    const t0 = Date.now();
+    const t = new Date(t0).toISOString();
+    $log!(
+      "QUESTION-EVENT-RECEIVED",
+      t,
+      req.id,
+      req.sessionID,
+      req.questions.length,
+      req.questions.map((q) => q.options.length),
+    );
+
+    // In `user` mode, do not intercept — let opencode show the question dialog.
+    if (mode === "user") {
+      $log!("ASK-USER", req.id, req.sessionID, "question", "mode-bypass", mode);
+      return;
+    }
+
+    // In `dangerously_skip` mode, pick the first option of each question.
+    // Mirrors the permission flow's escape-hatch semantics.
+    if (mode === "dangerously_skip") {
+      const answers = req.questions.map((q) => {
+        const first = q.options[0]?.label;
+        if (!first) return [] as string[];
+        return [first];
+      });
+      const elapsedMs = Date.now() - t0;
+      $log!("SKIP-SYNC", req.id, req.sessionID, "question", answers.length, elapsedMs);
+      try {
+        await deps.replyQuestion(req.sessionID, req.id, answers);
+        $log!("SKIP-SYNC", req.id, elapsedMs);
+      } catch (err) {
+        const error = String(err);
+        $log!("SKIP-SYNC", req.id, error);
+      }
+      return;
+    }
+
+    let decision: GuardianQuestionDecision;
+    try {
+      const transcript = await deps.loadTranscript(req.sessionID, transcriptCacheLimit);
+      decision = await deps.runQuestionReview(req, transcript);
+    } catch (err) {
+      const errorKind = err instanceof GuardianReviewError ? err.kind : "unknown";
+      const error = err instanceof Error ? err.message : String(err);
+      $log!("ASK-USER", req.id, req.sessionID, "question", "guardian-question-review-failed", errorKind, error);
+      return;
+    }
+
+    if (decision.action === "reject") {
+      const elapsedMs = Date.now() - t0;
+      $log!("REJECT", req.id, req.sessionID, "question", elapsedMs);
+      try {
+        await deps.rejectQuestion(req.sessionID, req.id);
+      } catch (err) {
+        const error = String(err);
+        $log!("REJECT", "reply failed:", req.id, error);
+      }
+      return;
+    }
+
+    const elapsedMs = Date.now() - t0;
+    $log!(
+      "ANSWER",
+      req.id,
+      req.sessionID,
+      "question",
+      decision.answers.length,
+      decision.answers.flat().length,
+      elapsedMs,
+    );
+    try {
+      await deps.replyQuestion(req.sessionID, req.id, decision.answers);
+    } catch (err) {
+      const error = String(err);
+      $log!("ANSWER", "reply failed:", req.id, error);
+    }
+  }
+
   return {
     event: async ({ event }) => {
       const e = event as RawEvent;
@@ -340,6 +441,13 @@ export async function createGuardianHooks(options: GuardianOptions, deps: Guardi
         const req = e.properties as PermissionAskedRequest | undefined;
         if (!req) return;
         await handlePermissionAsked(req);
+        return;
+      }
+
+      if (e.type === "question.asked") {
+        const req = e.properties as QuestionAskedRequest | undefined;
+        if (!req) return;
+        await handleQuestionAsked(req);
         return;
       }
 

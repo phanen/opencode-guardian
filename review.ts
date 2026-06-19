@@ -1,12 +1,15 @@
 import {
   buildGuardianPromptParts,
   buildGuardianUserContent,
+  buildQuestionPromptParts,
+  buildQuestionUserContent,
   type GuardianAction,
   type GuardianAssessment,
   type GuardianTranscriptEntry,
   parseGuardianAssessment,
+  parseQuestionDecision,
 } from "./prompt";
-import type { ContentPart, MessageInfo, ModelRef, SessionId } from "./types";
+import type { ContentPart, MessageInfo, ModelRef, QuestionAskedRequest, SessionId } from "./types";
 import { textFromParts } from "./utils";
 
 interface PromptTextPart {
@@ -169,4 +172,111 @@ export async function runGuardianReview(
   }
 
   throw lastError ?? new GuardianReviewError("prompt_failed", "guardian review failed without explicit error");
+}
+
+export type GuardianQuestionDecision = { action: "answer"; answers: string[][] } | { action: "reject" };
+
+export async function runGuardianQuestionReview(
+  request: QuestionAskedRequest,
+  transcript: GuardianTranscriptEntry[],
+  options: GuardianReviewOptions,
+  deps: GuardianReviewerDeps,
+  signal?: AbortSignal,
+): Promise<GuardianQuestionDecision> {
+  const userContent = buildQuestionUserContent(request, transcript);
+  const parts = buildQuestionPromptParts(request, transcript);
+  const systemPrompt = parts.system;
+  const deadline = Date.now() + options.timeoutMs;
+
+  let sessionID: string | undefined;
+  let lastError: GuardianReviewError | undefined;
+
+  for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
+    if (signal?.aborted) {
+      throw new GuardianReviewError("cancelled", "guardian question review cancelled");
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new GuardianReviewError(
+        "timeout",
+        lastError
+          ? `guardian question review timed out after retries: ${lastError.message}`
+          : `guardian question review timed out after ${options.timeoutMs}ms`,
+      );
+    }
+
+    try {
+      if (!sessionID) {
+        try {
+          const created = await deps.createSession();
+          sessionID = created.id;
+        } catch (err) {
+          throw new GuardianReviewError(
+            "session_create_failed",
+            `failed to create guardian session: ${(err as Error).message}`,
+          );
+        }
+      }
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        const t = setTimeout(() => {
+          reject(
+            new GuardianReviewError(
+              "timeout",
+              `guardian question review exceeded ${remaining}ms budget on attempt ${attempt}`,
+            ),
+          );
+        }, remaining);
+        if (signal) {
+          signal.addEventListener("abort", () => {
+            clearTimeout(t);
+            reject(new GuardianReviewError("cancelled", "guardian question review cancelled by signal"));
+          });
+        }
+      });
+
+      const result = await Promise.race([
+        deps.prompt(sessionID, {
+          system: systemPrompt,
+          parts: [{ type: "text", text: userContent }],
+          model: options.guardianModel,
+          noReply: false,
+        }),
+        timeoutPromise,
+      ]);
+
+      const text = textFromParts(result.parts);
+      if (!text) {
+        throw new GuardianReviewError("no_response", "guardian question review returned no text parts");
+      }
+
+      return parseQuestionDecision(text, request);
+    } catch (err) {
+      if (err instanceof GuardianReviewError) {
+        lastError = err;
+        if (err.kind === "timeout" || err.kind === "cancelled" || err.kind === "session_create_failed") {
+          throw err;
+        }
+        if (!isRetryableErrorKind(err.kind) || attempt === options.maxAttempts) {
+          throw err;
+        }
+      } else {
+        lastError = new GuardianReviewError(
+          "prompt_failed",
+          `guardian question prompt failed: ${(err as Error).message}`,
+        );
+        if (attempt === options.maxAttempts) {
+          throw lastError;
+        }
+      }
+
+      const wait = backoff(attempt, options.baseBackoffMs);
+      const sleepUntilDeadline = Math.min(wait, deadline - Date.now());
+      if (sleepUntilDeadline > 0) {
+        await sleep(sleepUntilDeadline);
+      }
+    }
+  }
+
+  throw lastError ?? new GuardianReviewError("prompt_failed", "guardian question review failed without explicit error");
 }

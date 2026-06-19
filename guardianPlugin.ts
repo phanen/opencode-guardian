@@ -8,16 +8,18 @@ import {
 } from "./guardianCore";
 import type { GuardianAction, GuardianTranscriptEntry } from "./prompt";
 import type { GuardianReviewOptions } from "./review";
-import { runGuardianReview } from "./review";
+import { runGuardianQuestionReview, runGuardianReview } from "./review";
 import { type GuardianMode, readMode, writeMode } from "./state";
 import type {
   LoggedError,
   PermissionReplyBody,
+  QuestionAskedRequest,
   RequestResult,
   SessionCreateResponse,
   SessionMessagesResponse,
   SessionPromptResponse,
   SdkClientWithPermissionReply,
+  SdkRawPostCall,
 } from "./types";
 // `debugLog` is the runtime target of the $log! macro below.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -126,6 +128,93 @@ async function replyPermission(
   }
 }
 
+interface SdkClientWithRawPostExposed {
+  _client?: SdkRawPostCall;
+}
+
+async function replyQuestion(
+  ctx: PluginInput,
+  _sessionID: string,
+  requestID: string,
+  answers: string[][],
+): Promise<void> {
+  $log!("Q-REPLY", requestID, "answer", answers.length, "transport=sdk_raw_post");
+
+  const sdkClient = ctx.client as ExtendedSdkClient & SdkClientWithRawPostExposed;
+  const raw = sdkClient._client;
+  if (!raw?.post) {
+    $log!("Q-REPLY", requestID, "missing_sdk_method");
+    throw new Error("opencode SDK does not expose a raw _client.post");
+  }
+
+  const t0 = Date.now();
+  try {
+    // Route through the SDK's underlying hey-api client (its configured
+    // `fetch` is `app.fetch` when running in-process, so the POST hits the
+    // in-process server that owns the pending map — same reasoning as
+    // replyPermission). The SDK does not expose a typed
+    // `client.question.reply` method in the 1.x line, so we POST the
+    // documented /question/{requestID}/reply endpoint directly.
+    const result = await raw.post({
+      url: `/question/${requestID}/reply`,
+      body: { answers },
+      headers: { "Content-Type": "application/json" },
+    });
+    const elapsed = Date.now() - t0;
+    const status = extractStatus(result);
+    $log!("Q-REPLY", requestID, status, elapsed);
+    $log!("Q-REPLY", requestID, "success", status);
+  } catch (err) {
+    const loggedErr = err as LoggedError;
+    const status = extractStatus(loggedErr);
+    const responseBody = loggedErr.response ? await loggedErr.response.text().catch(() => "(unreadable)") : "";
+    const sdkError = true;
+    const body = responseBody.slice(0, 500);
+    const message = loggedErr.message;
+    $log!("Q-REPLY", requestID, sdkError, status, body, message);
+    if (status === 404) {
+      $log!("Q-REPLY", requestID, "404_benign");
+      return;
+    }
+    throw err;
+  }
+}
+
+async function rejectQuestion(ctx: PluginInput, _sessionID: string, requestID: string): Promise<void> {
+  $log!("Q-REJECT", requestID, "reject", "transport=sdk_raw_post");
+
+  const sdkClient = ctx.client as ExtendedSdkClient & SdkClientWithRawPostExposed;
+  const raw = sdkClient._client;
+  if (!raw?.post) {
+    $log!("Q-REJECT", requestID, "missing_sdk_method");
+    throw new Error("opencode SDK does not expose a raw _client.post");
+  }
+
+  const t0 = Date.now();
+  try {
+    const result = await raw.post({
+      url: `/question/${requestID}/reject`,
+    });
+    const elapsed = Date.now() - t0;
+    const status = extractStatus(result);
+    $log!("Q-REJECT", requestID, status, elapsed);
+    $log!("Q-REJECT", requestID, "success", status);
+  } catch (err) {
+    const loggedErr = err as LoggedError;
+    const status = extractStatus(loggedErr);
+    const responseBody = loggedErr.response ? await loggedErr.response.text().catch(() => "(unreadable)") : "";
+    const sdkError = true;
+    const body = responseBody.slice(0, 500);
+    const message = loggedErr.message;
+    $log!("Q-REJECT", requestID, sdkError, status, body, message);
+    if (status === 404) {
+      $log!("Q-REJECT", requestID, "404_benign");
+      return;
+    }
+    throw err;
+  }
+}
+
 export default async function GuardianPlugin(
   ctx: PluginInput,
   options: GuardianPluginOptions = {},
@@ -181,6 +270,41 @@ export default async function GuardianPlugin(
     },
     replyPermission: async (sessionID, requestID, reply, message) =>
       replyPermission(ctx, sessionID, requestID, reply, message),
+    replyQuestion: async (sessionID, requestID, answers) => replyQuestion(ctx, sessionID, requestID, answers),
+    rejectQuestion: async (sessionID, requestID) => rejectQuestion(ctx, sessionID, requestID),
+    runQuestionReview: async (request: QuestionAskedRequest, transcript: GuardianTranscriptEntry[]) => {
+      return runGuardianQuestionReview(request, transcript, reviewOptions, {
+        createSession: async () => {
+          const res = (await sdkClient.session.create({})) as SessionCreateResponse;
+          const id = res?.data?.id;
+          if (!id) throw new Error("createSession returned no id");
+          return { id };
+        },
+        prompt: async (sessionID, body) => {
+          const res = (await sdkClient.session.prompt({
+            path: { id: sessionID },
+            body: {
+              system: body.system,
+              parts: body.parts,
+              model: body.model,
+              noReply: body.noReply,
+            },
+          })) as SessionPromptResponse;
+          const data = res?.data;
+          return {
+            info: data?.info ?? { id: "", sessionID, role: "assistant" },
+            parts: data?.parts ?? [],
+          };
+        },
+        abortSession: async (sessionID) => {
+          try {
+            await sdkClient.session.abort?.({ path: { id: sessionID } });
+          } catch {
+            // ignore
+          }
+        },
+      });
+    },
   };
 
   return createGuardianHooks(options, deps);

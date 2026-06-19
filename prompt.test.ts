@@ -1,4 +1,12 @@
-import { buildGuardianUserContent, formatActionSummary, type GuardianAction, parseGuardianAssessment } from "./prompt";
+import {
+  buildGuardianUserContent,
+  buildQuestionUserContent,
+  formatActionSummary,
+  type GuardianAction,
+  parseGuardianAssessment,
+  parseQuestionDecision,
+} from "./prompt";
+import type { QuestionAskedRequest } from "./types";
 
 const baseAction: GuardianAction = {
   id: "perm-1",
@@ -98,5 +106,104 @@ describe("prompt", () => {
   test("formatActionSummary omits empty metadata", () => {
     const s = formatActionSummary({ ...baseAction, metadata: {} });
     expect(s).toContain("bash(npm test)");
+  });
+});
+
+const baseQuestion: QuestionAskedRequest = {
+  id: "q-1",
+  sessionID: "ses-1",
+  questions: [
+    {
+      question: "Delete the build directory?",
+      header: "Delete build?",
+      options: [
+        { label: "Yes", description: "Run rm -rf build" },
+        { label: "No", description: "Keep build" },
+      ],
+    },
+  ],
+};
+
+describe("prompt — question helpers", () => {
+  test("buildQuestionUserContent includes transcript and questions", () => {
+    const text = buildQuestionUserContent(baseQuestion, [{ role: "user", text: "Please clean up." }]);
+    expect(text).toContain(">>> TRANSCRIPT START");
+    expect(text).toContain(">>> QUESTIONS START");
+    expect(text).toContain("Delete the build directory?");
+    expect(text).toContain("Yes");
+    expect(text).toContain("No");
+  });
+
+  test("parseQuestionDecision accepts plain answer JSON", () => {
+    const r = parseQuestionDecision(JSON.stringify({ action: "answer", answers: [["No"]] }), baseQuestion);
+    expect(r.action).toBe("answer");
+    if (r.action === "answer") {
+      expect(r.answers).toEqual([["No"]]);
+    }
+  });
+
+  test("parseQuestionDecision accepts reject", () => {
+    const r = parseQuestionDecision(JSON.stringify({ action: "reject", answers: [] }), baseQuestion);
+    expect(r.action).toBe("reject");
+  });
+
+  test("parseQuestionDecision strips markdown fence", () => {
+    const r = parseQuestionDecision(
+      `\`\`\`json\n${JSON.stringify({ action: "answer", answers: [["Yes"]] })}\n\`\`\``,
+      baseQuestion,
+    );
+    expect(r.action).toBe("answer");
+  });
+
+  test("parseQuestionDecision rejects unknown label", () => {
+    expect(() =>
+      parseQuestionDecision(JSON.stringify({ action: "answer", answers: [["Maybe"]] }), baseQuestion),
+    ).toThrow(/unknown label/);
+  });
+
+  test("parseQuestionDecision rejects wrong answer count", () => {
+    expect(() => parseQuestionDecision(JSON.stringify({ action: "answer", answers: [] }), baseQuestion)).toThrow(
+      /answers\.length=0/,
+    );
+  });
+
+  test("parseQuestionDecision rejects empty per-question array", () => {
+    expect(() => parseQuestionDecision(JSON.stringify({ action: "answer", answers: [[]] }), baseQuestion)).toThrow(
+      /non-empty array/,
+    );
+  });
+
+  test("parseQuestionDecision rejects missing action", () => {
+    expect(() => parseQuestionDecision(JSON.stringify({ answers: [["Yes"]] }), baseQuestion)).toThrow(/action/);
+  });
+
+  test("parseQuestionDecision handles multi-question request", () => {
+    const multi: QuestionAskedRequest = {
+      id: "q-2",
+      sessionID: "ses-1",
+      questions: [
+        {
+          question: "Q1",
+          header: "h1",
+          options: [
+            { label: "A", description: "" },
+            { label: "B", description: "" },
+          ],
+        },
+        {
+          question: "Q2",
+          header: "h2",
+          options: [
+            { label: "X", description: "" },
+            { label: "Y", description: "" },
+          ],
+        },
+      ],
+    };
+    const r = parseQuestionDecision(JSON.stringify({ action: "answer", answers: [["A"], ["X", "Y"]] }), multi);
+    expect(r.action).toBe("answer");
+    if (r.action === "answer") {
+      expect(r.answers).toEqual([["A"], ["X", "Y"]]);
+    }
   });
 });

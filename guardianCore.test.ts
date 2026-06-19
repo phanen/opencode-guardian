@@ -5,8 +5,9 @@ import {
   type GuardianReply,
 } from "./guardianCore";
 import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
-import { GuardianReviewError } from "./review";
+import { GuardianReviewError, type GuardianQuestionDecision } from "./review";
 import type { GuardianMode } from "./state";
+import type { QuestionAskedRequest } from "./types";
 
 interface ReplyCall {
   requestID: string;
@@ -14,11 +15,22 @@ interface ReplyCall {
   message?: string;
 }
 
+interface QuestionAnswerCall {
+  requestID: string;
+  answers: string[][];
+}
+
+interface QuestionRejectCall {
+  requestID: string;
+}
+
 interface Deps {
   mode: GuardianMode;
   decisions?: GuardianAssessment[];
   reviewError?: Error;
   transcript?: GuardianTranscriptEntry[];
+  questionDecisions?: GuardianQuestionDecision[];
+  questionReviewError?: Error;
 }
 
 function makeDeps(d: Deps) {
@@ -27,6 +39,9 @@ function makeDeps(d: Deps) {
   const reviewCalls: Array<GuardianAction> = [];
   const transcriptsLoaded: Array<string> = [];
   const replies: ReplyCall[] = [];
+  const questionAnswers: QuestionAnswerCall[] = [];
+  const questionRejects: QuestionRejectCall[] = [];
+  const questionReviewCalls: Array<QuestionAskedRequest> = [];
 
   const deps = {
     readMode: async () => mode,
@@ -54,9 +69,31 @@ function makeDeps(d: Deps) {
     replyPermission: async (sessionID: string, requestID: string, reply: GuardianReply, message?: string) => {
       replies.push(message !== undefined ? { requestID, reply, message, sessionID } : { requestID, reply, sessionID });
     },
+    replyQuestion: async (_sessionID: string, requestID: string, answers: string[][]) => {
+      questionAnswers.push({ requestID, answers });
+    },
+    rejectQuestion: async (_sessionID: string, requestID: string) => {
+      questionRejects.push({ requestID });
+    },
+    runQuestionReview: async (request: QuestionAskedRequest): Promise<GuardianQuestionDecision> => {
+      questionReviewCalls.push(request);
+      if (d.questionReviewError) throw d.questionReviewError;
+      const next = d.questionDecisions?.shift();
+      return next ?? { action: "answer", answers: request.questions.map((q) => [q.options[0]?.label ?? ""]) };
+    },
   };
 
-  return { deps, writes, reviewCalls, transcriptsLoaded, replies, getMode: () => mode };
+  return {
+    deps,
+    writes,
+    reviewCalls,
+    transcriptsLoaded,
+    replies,
+    questionAnswers,
+    questionRejects,
+    questionReviewCalls,
+    getMode: () => mode,
+  };
 }
 
 const sampleRequest = {
@@ -71,6 +108,27 @@ const sampleRequest = {
 async function emitPermissionAsked(hooks: Awaited<ReturnType<typeof createGuardianHooks>>, req: typeof sampleRequest) {
   await hooks.event!({
     event: { type: "permission.asked", properties: req },
+  });
+}
+
+const sampleQuestion: QuestionAskedRequest = {
+  id: "q-1",
+  sessionID: "ses-q",
+  questions: [
+    {
+      question: "Delete the build directory?",
+      header: "Delete build?",
+      options: [
+        { label: "Yes", description: "Run rm -rf build" },
+        { label: "No", description: "Keep build" },
+      ],
+    },
+  ],
+};
+
+async function emitQuestionAsked(hooks: Awaited<ReturnType<typeof createGuardianHooks>>, req: QuestionAskedRequest) {
+  await hooks.event!({
+    event: { type: "question.asked", properties: req },
   });
 }
 
@@ -388,5 +446,115 @@ describe("actionFromPermission (internals)", () => {
     expect(isGuardianCommandPattern(["guardian status"])).toBe(true);
     expect(isGuardianCommandPattern(["/guardian on"])).toBe(true);
     expect(isGuardianCommandPattern(["npm test"])).toBe(false);
+  });
+});
+
+describe("guardianCore — question dialog support", () => {
+  test("user mode does not call review or reply on question.asked", async () => {
+    const t = makeDeps({ mode: "user" });
+    const hooks = await createGuardianHooks({}, t.deps);
+    await emitQuestionAsked(hooks, sampleQuestion);
+    expect(t.questionReviewCalls).toEqual([]);
+    expect(t.questionAnswers).toEqual([]);
+    expect(t.questionRejects).toEqual([]);
+  });
+
+  test("dangerously_skip mode picks first option of each question", async () => {
+    const t = makeDeps({ mode: "dangerously_skip" });
+    const hooks = await createGuardianHooks({}, t.deps);
+    const multi: QuestionAskedRequest = {
+      id: "q-multi",
+      sessionID: "ses-q",
+      questions: [
+        { question: "Q1", header: "h1", options: [{ label: "A1", description: "" }] },
+        { question: "Q2", header: "h2", options: [{ label: "B1", description: "" }] },
+      ],
+    };
+    await emitQuestionAsked(hooks, multi);
+    expect(t.questionReviewCalls).toEqual([]);
+    expect(t.questionAnswers).toEqual([{ requestID: "q-multi", answers: [["A1"], ["B1"]] }]);
+    expect(t.questionRejects).toEqual([]);
+  });
+
+  test("auto_review + answer → calls replyQuestion with chosen labels", async () => {
+    const t = makeDeps({
+      mode: "auto_review",
+      questionDecisions: [{ action: "answer", answers: [["No"]] }],
+    });
+    const hooks = await createGuardianHooks({}, t.deps);
+    await emitQuestionAsked(hooks, sampleQuestion);
+    expect(t.questionReviewCalls).toHaveLength(1);
+    expect(t.transcriptsLoaded).toEqual(["ses-q"]);
+    expect(t.questionAnswers).toEqual([{ requestID: "q-1", answers: [["No"]] }]);
+    expect(t.questionRejects).toEqual([]);
+  });
+
+  test("auto_review + reject → calls rejectQuestion", async () => {
+    const t = makeDeps({
+      mode: "auto_review",
+      questionDecisions: [{ action: "reject" }],
+    });
+    const hooks = await createGuardianHooks({}, t.deps);
+    await emitQuestionAsked(hooks, sampleQuestion);
+    expect(t.questionAnswers).toEqual([]);
+    expect(t.questionRejects).toEqual([{ requestID: "q-1" }]);
+  });
+
+  test("question review error → no reply, falls back to user", async () => {
+    const t = makeDeps({
+      mode: "auto_review",
+      questionReviewError: new GuardianReviewError("timeout", "timed out"),
+    });
+    const hooks = await createGuardianHooks({}, t.deps);
+    await emitQuestionAsked(hooks, sampleQuestion);
+    expect(t.questionAnswers).toEqual([]);
+    expect(t.questionRejects).toEqual([]);
+    expect(t.questionReviewCalls).toHaveLength(1);
+  });
+
+  test("multi-question request: one review call, one reply with all answers", async () => {
+    const multi: QuestionAskedRequest = {
+      id: "q-m",
+      sessionID: "ses-q",
+      questions: [
+        {
+          question: "Q1",
+          header: "h1",
+          options: [
+            { label: "A", description: "" },
+            { label: "B", description: "" },
+          ],
+        },
+        {
+          question: "Q2",
+          header: "h2",
+          options: [
+            { label: "X", description: "" },
+            { label: "Y", description: "" },
+          ],
+        },
+      ],
+    };
+    const t = makeDeps({
+      mode: "auto_review",
+      questionDecisions: [{ action: "answer", answers: [["A"], ["X", "Y"]] }],
+    });
+    const hooks = await createGuardianHooks({}, t.deps);
+    await emitQuestionAsked(hooks, multi);
+    expect(t.questionReviewCalls).toHaveLength(1);
+    expect(t.questionAnswers).toEqual([{ requestID: "q-m", answers: [["A"], ["X", "Y"]] }]);
+  });
+
+  test("permission.asked and question.asked do not interfere", async () => {
+    const t = makeDeps({
+      mode: "auto_review",
+      decisions: [{ risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "ok" }],
+      questionDecisions: [{ action: "answer", answers: [["Yes"]] }],
+    });
+    const hooks = await createGuardianHooks({}, t.deps);
+    await emitPermissionAsked(hooks, sampleRequest);
+    await emitQuestionAsked(hooks, sampleQuestion);
+    expect(t.replies).toEqual([{ sessionID: "ses-1", requestID: "req-1", reply: "once" }]);
+    expect(t.questionAnswers).toEqual([{ requestID: "q-1", answers: [["Yes"]] }]);
   });
 });

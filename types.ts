@@ -82,9 +82,34 @@ export interface PermissionAskedRequest {
   tool?: ToolRef;
 }
 
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface QuestionInfo {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiple?: boolean;
+  custom?: boolean;
+}
+
+export interface QuestionTool {
+  messageID: string;
+  callID: string;
+}
+
+export interface QuestionAskedRequest {
+  id: string;
+  sessionID: string;
+  questions: QuestionInfo[];
+  tool?: QuestionTool;
+}
+
 export interface RawEvent {
   type?: string;
-  properties?: PermissionAskedRequest | { sessionID?: string } | undefined;
+  properties?: PermissionAskedRequest | QuestionAskedRequest | { sessionID?: string } | undefined;
 }
 
 export interface RequestResult {
@@ -99,4 +124,25 @@ export interface LoggedError extends Error {
 
 export interface SdkClientWithPermissionReply {
   postSessionIdPermissionsPermissionId?: (options: PermissionReplyOptions) => Promise<unknown>;
+}
+
+// The hey-api client used inside @opencode-ai/sdk. We need a way to make
+// raw HTTP calls (e.g. POST /question/:requestID/reply) when the SDK does
+// not expose a typed method. The SDK stores the underlying client on a
+// protected `_client` field; at runtime it is a normal property, so we
+// reach it through a structural type assertion. The configured `fetch`
+// option is what routes requests to the in-process server when no
+// listening URL is available.
+export interface SdkRawPostCall {
+  post: (options: SdkRawPostOptions) => Promise<unknown>;
+}
+
+export interface SdkRawPostOptions {
+  url: string;
+  body?: unknown;
+  headers?: Record<string, string>;
+}
+
+export interface SdkClientWithRawPost {
+  _client: SdkRawPostCall;
 }
