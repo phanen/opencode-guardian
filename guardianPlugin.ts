@@ -16,12 +16,12 @@ interface PluginCtx {
       prompt: (opts: any) => Promise<{ data?: { info: any; parts: any[] } }>;
       messages: (opts: any) => Promise<{ data?: Array<{ info: any; parts: any[] }> }>;
       abort?: (opts: any) => Promise<unknown>;
-      postSessionIdPermissionsPermissionId?: (opts: {
-        body: { response: "once" | "always" | "reject"; message?: string };
-        path: { id: string; permissionID: string };
-        query?: { directory?: string };
-      }) => Promise<unknown>;
     };
+    postSessionIdPermissionsPermissionId?: (opts: {
+      body: { response: "once" | "always" | "reject"; message?: string };
+      path: { id: string; permissionID: string };
+      query?: { directory?: string };
+    }) => Promise<unknown>;
   };
   directory: string;
   worktree: string;
@@ -108,7 +108,7 @@ async function replyPermission(
   // that owns the pending map. Plain Node fetch would go to the URL the
   // server is listening on, which (when running standalone TUI) is a
   // different process's server with an empty pending map — returning 404.
-  const sdkMethod = ctx.client.session.postSessionIdPermissionsPermissionId;
+  const sdkMethod = ctx.client.postSessionIdPermissionsPermissionId;
   if (!sdkMethod) {
     log(`request_id=${requestID} outcome=missing_sdk_method`);
     throw new Error("opencode SDK does not expose postSessionIdPermissionsPermissionId");
