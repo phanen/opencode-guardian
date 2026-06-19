@@ -116,10 +116,7 @@ export async function runGuardianReview(
       const timeoutPromise = new Promise<never>((_, reject) => {
         const t = setTimeout(() => {
           reject(
-            new GuardianReviewError(
-              "timeout",
-              `guardian review exceeded ${remaining}ms budget on attempt ${attempt}`,
-            ),
+            new GuardianReviewError("timeout", `guardian review exceeded ${remaining}ms budget on attempt ${attempt}`),
           );
         }, remaining);
         if (signal) {
@@ -150,21 +147,14 @@ export async function runGuardianReview(
     } catch (err) {
       if (err instanceof GuardianReviewError) {
         lastError = err;
-        if (
-          err.kind === "timeout" ||
-          err.kind === "cancelled" ||
-          err.kind === "session_create_failed"
-        ) {
+        if (err.kind === "timeout" || err.kind === "cancelled" || err.kind === "session_create_failed") {
           throw err;
         }
         if (!isRetryableErrorKind(err.kind) || attempt === options.maxAttempts) {
           throw err;
         }
       } else {
-        lastError = new GuardianReviewError(
-          "prompt_failed",
-          `guardian prompt failed: ${(err as Error).message}`,
-        );
+        lastError = new GuardianReviewError("prompt_failed", `guardian prompt failed: ${(err as Error).message}`);
         if (attempt === options.maxAttempts) {
           throw lastError;
         }
@@ -178,8 +168,5 @@ export async function runGuardianReview(
     }
   }
 
-  throw (
-    lastError ??
-    new GuardianReviewError("prompt_failed", "guardian review failed without explicit error")
-  );
+  throw lastError ?? new GuardianReviewError("prompt_failed", "guardian review failed without explicit error");
 }

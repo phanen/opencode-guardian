@@ -1,5 +1,3 @@
-import { appendFileSync } from "node:fs";
-import { randomBytes } from "node:crypto";
 import type { Hooks } from "@opencode-ai/plugin";
 import type { Part, TextPart } from "@opencode-ai/sdk";
 import { maybeHandleGuardianCommand, statusLineFor } from "./commands";
@@ -7,29 +5,16 @@ import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from
 import { GuardianReviewError } from "./review";
 import type { GuardianMode } from "./state";
 import type { ModelRef, PermissionAskedRequest, RawEvent } from "./types";
+// `debugLog` is the runtime target of the $log! macro below; it is
+// referenced by the expanded output and must stay imported.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { debugLog } from "./utils";
+import { $log } from "./debugLog.macro";
 
 // Re-export for plugin consumers.
 export type { PermissionAskedRequest } from "./types";
 
-const YOLO_DEBUG_LOG = "/tmp/guardian-debug.log";
-
-// Stable per-process prefix so concurrent opencode sessions are easy to
-// distinguish when they all append to the same shared log file.
-const INSTANCE_ID = randomBytes(3).toString("hex");
-const PROCESS_PID = process.pid;
 const PROCESS_CWD = process.cwd();
-
-function guardianLog(...args: unknown[]) {
-  try {
-    const line =
-      `${new Date().toISOString()} [GUARDIAN pid=${PROCESS_PID} inst=${INSTANCE_ID}] ` +
-      args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ") +
-      "\n";
-    appendFileSync(YOLO_DEBUG_LOG, line);
-  } catch {
-    // never throw from logging
-  }
-}
 
 export interface GuardianOptions {
   mode?: GuardianMode;
@@ -61,12 +46,7 @@ export interface GuardianRuntimeDeps {
    * "not found" errors (the user may have already responded manually before
    * guardian finished) and surface other failures.
    */
-  replyPermission: (
-    sessionID: string,
-    requestID: string,
-    reply: GuardianReply,
-    message?: string,
-  ) => Promise<void>;
+  replyPermission: (sessionID: string, requestID: string, reply: GuardianReply, message?: string) => Promise<void>;
 }
 
 const DEFAULT_TRANSCRIPT_CACHE_LIMIT = 40;
@@ -151,8 +131,7 @@ class CircuitBreaker {
 
     const recentCount = turn.recentDenials.filter(Boolean).length;
     const tripped =
-      !turn.interrupted &&
-      (turn.consecutiveDenials >= opts.maxConsecutive || recentCount >= opts.maxRecent);
+      !turn.interrupted && (turn.consecutiveDenials >= opts.maxConsecutive || recentCount >= opts.maxRecent);
     if (tripped) turn.interrupted = true;
     return { tripped, consecutiveDenials: turn.consecutiveDenials, recentDenials: recentCount };
   }
@@ -170,34 +149,19 @@ class CircuitBreaker {
   }
 }
 
-export async function createGuardianHooks(
-  options: GuardianOptions,
-  deps: GuardianRuntimeDeps,
-): Promise<Hooks> {
+export async function createGuardianHooks(options: GuardianOptions, deps: GuardianRuntimeDeps): Promise<Hooks> {
   let mode = await deps.readMode();
-  guardianLog(
-    "[PLUGIN-LOAD] mode=",
-    mode,
-    "cwd=",
-    PROCESS_CWD,
-    "guardian_model=",
-    options.guardianModel
-      ? `${options.guardianModel.providerID}/${options.guardianModel.modelID}`
-      : "(default)",
-    "timeoutMs=",
-    options.timeoutMs ?? 90_000,
-    "max_consecutive_denials=",
-    options.maxConsecutiveDenials ?? DEFAULT_MAX_CONSECUTIVE_DENIALS,
-    "max_recent_denials=",
-    options.maxRecentDenials ?? DEFAULT_MAX_RECENT_DENIALS,
-  );
-
-  const transcriptCacheLimit = options.transcriptCacheLimit ?? DEFAULT_TRANSCRIPT_CACHE_LIMIT;
+  const guardianModel = options.guardianModel
+    ? `${options.guardianModel.providerID}/${options.guardianModel.modelID}`
+    : "(default)";
+  const timeoutMs = options.timeoutMs ?? 90_000;
   const maxConsecutiveDenials = options.maxConsecutiveDenials ?? DEFAULT_MAX_CONSECUTIVE_DENIALS;
   const maxRecentDenials = options.maxRecentDenials ?? DEFAULT_MAX_RECENT_DENIALS;
+  $log!("PLUGIN-LOAD", mode, PROCESS_CWD, guardianModel, timeoutMs, maxConsecutiveDenials, maxRecentDenials);
+
+  const transcriptCacheLimit = options.transcriptCacheLimit ?? DEFAULT_TRANSCRIPT_CACHE_LIMIT;
   const recentDenialWindow = options.recentDenialWindow ?? DEFAULT_RECENT_DENIAL_WINDOW;
-  const fallbackOnCircuitBreak =
-    options.fallbackOnCircuitBreak ?? DEFAULT_FALLBACK_ON_CIRCUIT_BREAK;
+  const fallbackOnCircuitBreak = options.fallbackOnCircuitBreak ?? DEFAULT_FALLBACK_ON_CIRCUIT_BREAK;
 
   const circuitBreaker = new CircuitBreaker();
   const activeGuardianCommandSessions = new Set<string>();
@@ -208,58 +172,24 @@ export async function createGuardianHooks(
     const patterns = normalizePatterns(req.patterns);
 
     const t0 = Date.now();
-    guardianLog(
-      "[PERMISSION-EVENT-RECEIVED]",
-      "t=",
-      new Date(t0).toISOString(),
-      "request=",
-      req.id,
-      "session=",
-      req.sessionID,
-      "type=",
-      req.permission,
-      "patterns=",
-      JSON.stringify(patterns),
-    );
+    const t = new Date(t0).toISOString();
+    $log!("PERMISSION-EVENT-RECEIVED", t, req.id, req.sessionID, req.permission, patterns);
 
     // Block bash invocations of `guardian` regardless of mode.
     if (isGuardianCommandPattern(patterns) && req.permission === "bash") {
-      guardianLog(
-        "[DENY-LOCAL] request=",
-        req.id,
-        "session=",
-        req.sessionID,
-        "type=bash",
-        "reason=bash-invokes-guardian-binary",
-        "patterns=",
-        JSON.stringify(patterns),
-      );
+      $log!("DENY-LOCAL", req.id, req.sessionID, "bash", "bash-invokes-guardian-binary", patterns);
       try {
-        await deps.replyPermission(
-          req.sessionID,
-          req.id,
-          "reject",
-          "bash invocation of guardian is not allowed",
-        );
+        await deps.replyPermission(req.sessionID, req.id, "reject", "bash invocation of guardian is not allowed");
       } catch (err) {
-        guardianLog("[DENY-LOCAL] reply failed:", req.id, String(err));
+        const error = String(err);
+        $log!("DENY-LOCAL", req.id, error);
       }
       return;
     }
 
     // Block any tool call during an in-flight /guardian command for this session.
     if (activeGuardianCommandSessions.has(req.sessionID)) {
-      guardianLog(
-        "[DENY-LOCAL] request=",
-        req.id,
-        "session=",
-        req.sessionID,
-        "type=",
-        req.permission,
-        "reason=tool-blocked-during-/guardian-command",
-        "patterns=",
-        JSON.stringify(patterns),
-      );
+      $log!("DENY-LOCAL", req.id, req.sessionID, req.permission, "tool-blocked-during-/guardian-command", patterns);
       try {
         await deps.replyPermission(
           req.sessionID,
@@ -268,24 +198,15 @@ export async function createGuardianHooks(
           "tool blocked while /guardian command is in flight",
         );
       } catch (err) {
-        guardianLog("[DENY-LOCAL] reply failed:", req.id, String(err));
+        const error = String(err);
+        $log!("DENY-LOCAL", req.id, error);
       }
       return;
     }
 
     // In `user` mode, do not intercept — let opencode show the dialog.
     if (mode === "user") {
-      guardianLog(
-        "[ASK-USER] request=",
-        req.id,
-        "session=",
-        req.sessionID,
-        "type=",
-        req.permission,
-        "reason=mode-is-user (guardian bypassed)",
-        "patterns=",
-        JSON.stringify(patterns),
-      );
+      $log!("ASK-USER", req.id, req.sessionID, req.permission, "mode-is-user (guardian bypassed)", patterns);
       return;
     }
 
@@ -295,103 +216,69 @@ export async function createGuardianHooks(
     // path is broken). Keeps the same [SKIP-SYNC] log lines for parity
     // with the LLM-driven branch.
     if (mode === "dangerously_skip") {
-      guardianLog(
-        "[SKIP-SYNC] request=",
-        req.id,
-        "session=",
-        req.sessionID,
-        "type=",
-        req.permission,
-        "patterns=",
-        JSON.stringify(patterns),
-        "elapsed_ms=",
-        Date.now() - t0,
-      );
+      const patternsJson = JSON.stringify(patterns);
+      const elapsedMs = Date.now() - t0;
+      $log!("SKIP-SYNC", req.id, req.sessionID, req.permission, patternsJson, elapsedMs);
       try {
         await deps.replyPermission(req.sessionID, req.id, "once");
-        guardianLog("[SKIP-SYNC] reply sent request=", req.id, "elapsed_ms=", Date.now() - t0);
+        $log!("SKIP-SYNC", req.id, elapsedMs);
       } catch (err) {
-        guardianLog("[SKIP-SYNC] reply failed:", req.id, String(err));
+        const error = String(err);
+        $log!("SKIP-SYNC", req.id, error);
       }
       return;
     }
 
     // Circuit breaker tripped for this session — hand control to the user.
     if (circuitBreaker.isTripped(req.sessionID)) {
-      guardianLog(
-        "[ASK-USER] request=",
+      const patternsJson = JSON.stringify(patterns);
+      $log!(
+        "ASK-USER",
         req.id,
-        "session=",
         req.sessionID,
-        "type=",
         req.permission,
-        "reason=circuit-breaker-tripped (guardian bypassed)",
-        "patterns=",
-        JSON.stringify(patterns),
+        "circuit-breaker-tripped (guardian bypassed)",
+        patternsJson,
       );
       return;
     }
 
     const transcript = await deps.loadTranscript(req.sessionID, transcriptCacheLimit);
     const action = actionFromPermission(req);
-    guardianLog(
-      "[REVIEW] request=",
-      req.id,
-      "session=",
-      req.sessionID,
-      "type=",
-      action.permission,
-      "patterns=",
-      JSON.stringify(patterns),
-      "transcript_entries=",
-      transcript.length,
-    );
+    const patternsJson = JSON.stringify(patterns);
+    const transcriptEntries = transcript.length;
+    $log!("REVIEW", req.id, req.sessionID, action.permission, patternsJson, transcriptEntries);
 
     let assessment: GuardianAssessment;
     try {
       assessment = await deps.runReview(action, transcript);
     } catch (err) {
       // Fail-open: do not reply, leave the dialog to the user.
-      const kind = err instanceof GuardianReviewError ? err.kind : "unknown";
-      const msg = err instanceof Error ? err.message : String(err);
-      guardianLog(
-        "[ASK-USER] request=",
-        req.id,
-        "session=",
-        req.sessionID,
-        "type=",
-        action.permission,
-        "reason=guardian-review-failed",
-        "error_kind=",
-        kind,
-        "error=",
-        msg,
-      );
+      const errorKind = err instanceof GuardianReviewError ? err.kind : "unknown";
+      const error = err instanceof Error ? err.message : String(err);
+      $log!("ASK-USER", req.id, req.sessionID, action.permission, "guardian-review-failed", errorKind, error);
       return;
     }
 
     if (assessment.outcome === "allow") {
       circuitBreaker.recordAllow(req.sessionID);
-      guardianLog(
-        "[ALLOW] request=",
+      const elapsedMs = Date.now() - t0;
+      const rationale = assessment.rationale.slice(0, 200);
+      $log!(
+        "ALLOW",
         req.id,
-        "session=",
         req.sessionID,
-        "type=",
         action.permission,
-        "risk=",
         assessment.risk_level,
-        "auth=",
         assessment.user_authorization,
-        "elapsed_ms=",
-        Date.now() - t0,
-        "rationale=",
-        assessment.rationale.slice(0, 200),
+        elapsedMs,
+        rationale,
       );
       try {
         await deps.replyPermission(req.sessionID, req.id, "once");
       } catch (err) {
-        guardianLog("[ALLOW] reply failed:", req.id, String(err));
+        const error = String(err);
+        $log!("ALLOW", "reply failed:", req.id, error);
       }
       return;
     }
@@ -404,54 +291,43 @@ export async function createGuardianHooks(
     });
 
     if (breaker.tripped && fallbackOnCircuitBreak) {
-      guardianLog(
-        "[ASK-USER] request=",
+      const rationale = assessment.rationale.slice(0, 200);
+      $log!(
+        "ASK-USER",
         req.id,
-        "session=",
         req.sessionID,
-        "type=",
         action.permission,
-        "risk=",
         assessment.risk_level,
-        "auth=",
         assessment.user_authorization,
-        "reason=circuit-breaker-tripped",
-        "consecutive_denials=",
+        "circuit-breaker-tripped",
         breaker.consecutiveDenials,
-        "recent_denials=",
         breaker.recentDenials,
-        "rationale=",
-        assessment.rationale.slice(0, 200),
+        rationale,
       );
       // Do not reply — opencode's TUI dialog remains for the user to decide.
       return;
     }
 
     const denialMessage = `${assessment.rationale.trim()}\n${GUARDIAN_DENIAL_INSTRUCTIONS}`;
-    guardianLog(
-      "[DENY] request=",
+    const elapsedMs = Date.now() - t0;
+    const rationale = assessment.rationale.slice(0, 200);
+    $log!(
+      "DENY",
       req.id,
-      "session=",
       req.sessionID,
-      "type=",
       action.permission,
-      "risk=",
       assessment.risk_level,
-      "auth=",
       assessment.user_authorization,
-      "elapsed_ms=",
-      Date.now() - t0,
-      "consecutive_denials=",
+      elapsedMs,
       breaker.consecutiveDenials,
-      "recent_denials=",
       breaker.recentDenials,
-      "rationale=",
-      assessment.rationale.slice(0, 200),
+      rationale,
     );
     try {
       await deps.replyPermission(req.sessionID, req.id, "reject", denialMessage);
     } catch (err) {
-      guardianLog("[DENY] reply failed:", req.id, String(err));
+      const error = String(err);
+      $log!("DENY", "reply failed:", req.id, error);
     }
   }
 
@@ -472,13 +348,7 @@ export async function createGuardianHooks(
         if (typeof sid === "string") {
           const wasActive = activeGuardianCommandSessions.delete(sid);
           circuitBreaker.clearTurn(sid);
-          guardianLog(
-            "[SESSION-IDLE] session=",
-            sid,
-            "circuit_breaker_cleared=true",
-            "active_command_cleared=",
-            wasActive,
-          );
+          $log!("SESSION-IDLE", sid, true, wasActive);
         }
       }
     },
@@ -503,15 +373,8 @@ export async function createGuardianHooks(
           });
           if (result.handled && result.mode) {
             mode = result.mode;
-            guardianLog(
-              "[MODE-CHANGE] session=",
-              input.sessionID,
-              "via=command",
-              "new_mode=",
-              result.mode,
-              "args=",
-              JSON.stringify(input.arguments),
-            );
+            const argsJson = JSON.stringify(input.arguments);
+            $log!("MODE-CHANGE", input.sessionID, "via=command", result.mode, argsJson);
           }
           text =
             result.handled && result.mode
@@ -526,15 +389,9 @@ export async function createGuardianHooks(
         // Synthetic TextPart for the command response — id/sessionID/messageID
         // are not meaningful for the LLM-facing command echo, so we cast.
         output.parts.push({ type: "text", text } as Part);
-        guardianLog(
-          "[CMD] session=",
-          input.sessionID,
-          "command=/guardian",
-          "args=",
-          JSON.stringify(input.arguments),
-          "response=",
-          text.slice(0, 120),
-        );
+        const argsJson = JSON.stringify(input.arguments);
+        const responseText = text.slice(0, 120);
+        $log!("CMD", input.sessionID, "/guardian", argsJson, responseText);
       } finally {
         // /guardian is a synchronous text-only command — the entire body
         // lives in this hook. Clear the active flag so subsequent tool
@@ -557,28 +414,16 @@ export async function createGuardianHooks(
       });
       if (result.handled && result.mode) {
         mode = result.mode;
-        guardianLog(
-          "[MODE-CHANGE] session=",
-          output.message?.sessionID ?? "(unknown)",
-          "via=chat",
-          "new_mode=",
-          result.mode,
-          "trigger=",
-          JSON.stringify(text.slice(0, 80)),
-        );
+        const triggerJson = JSON.stringify(text.slice(0, 80));
+        $log!("[MODE-CHANGE]", output.message?.sessionID ?? "(unknown)", "via=chat", result.mode, triggerJson);
       }
     },
 
     "tool.execute.before": async (input, output) => {
       if (!activeGuardianCommandSessions.has(input.sessionID)) return;
       if (input.tool !== "bash") return;
-      guardianLog(
-        "[NOOP-BASH] session=",
-        input.sessionID,
-        "reason=/guardian-command-active",
-        "original_args=",
-        JSON.stringify(output.args ?? {}).slice(0, 200),
-      );
+      const originalArgs = JSON.stringify(output.args ?? {}).slice(0, 200);
+      $log!("[NOOP-BASH]", input.sessionID, "/guardian-command-active", originalArgs);
       output.args = {
         ...(output.args ?? {}),
         command: ":",

@@ -1,9 +1,4 @@
-import {
-  buildGuardianUserContent,
-  formatActionSummary,
-  type GuardianAction,
-  parseGuardianAssessment,
-} from "./prompt";
+import { buildGuardianUserContent, formatActionSummary, type GuardianAction, parseGuardianAssessment } from "./prompt";
 
 const baseAction: GuardianAction = {
   id: "perm-1",
@@ -66,9 +61,7 @@ describe("prompt", () => {
     expect(() => parseGuardianAssessment("{}")).toThrow();
     expect(() => parseGuardianAssessment('{"outcome":"allow"}')).toThrow();
     expect(() =>
-      parseGuardianAssessment(
-        JSON.stringify({ risk_level: "high", user_authorization: "low", outcome: "deny" }),
-      ),
+      parseGuardianAssessment(JSON.stringify({ risk_level: "high", user_authorization: "low", outcome: "deny" })),
     ).toThrow();
   });
 

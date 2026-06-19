@@ -54,9 +54,7 @@ export async function maybeHandleGuardianCommand(
 }
 
 export function statusLineFor(mode: GuardianMode): string {
-  if (mode === "auto_review")
-    return "Guardian mode: auto_review (LLM reviews each approval request).";
-  if (mode === "dangerously_skip")
-    return "Guardian mode: dangerously_skip (all permissions auto-allowed, no LLM).";
+  if (mode === "auto_review") return "Guardian mode: auto_review (LLM reviews each approval request).";
+  if (mode === "dangerously_skip") return "Guardian mode: dangerously_skip (all permissions auto-allowed, no LLM).";
   return "Guardian mode: user (all approvals go to the human).";
 }

@@ -95,8 +95,7 @@ function renderTranscript(entries: GuardianTranscriptEntry[]): string {
 
   const lines = ["", ">>> TRANSCRIPT START", ""];
   for (const entry of kept) {
-    const tag =
-      entry.role === "user" ? "[USER]" : entry.role === "assistant" ? "[ASSISTANT]" : "[TOOL]";
+    const tag = entry.role === "user" ? "[USER]" : entry.role === "assistant" ? "[ASSISTANT]" : "[TOOL]";
     lines.push(`${tag} ${entry.text}`, "");
   }
   lines.push(">>> TRANSCRIPT END", "");
@@ -135,10 +134,7 @@ export function buildGuardianPromptParts(
   };
 }
 
-export function buildGuardianUserContent(
-  action: GuardianAction,
-  transcript: GuardianTranscriptEntry[],
-): string {
+export function buildGuardianUserContent(action: GuardianAction, transcript: GuardianTranscriptEntry[]): string {
   const parts = buildGuardianPromptParts(action, transcript);
   return [parts.transcript, ">>> ACTION START", parts.action, ">>> ACTION END", ""].join("\n");
 }
@@ -197,9 +193,7 @@ export function parseGuardianAssessment(text: string): GuardianAssessment {
     throw new Error(`guardian response missing or invalid risk_level: ${String(obj.risk_level)}`);
   }
   if (!isAuthLevel(obj.user_authorization)) {
-    throw new Error(
-      `guardian response missing or invalid user_authorization: ${String(obj.user_authorization)}`,
-    );
+    throw new Error(`guardian response missing or invalid user_authorization: ${String(obj.user_authorization)}`);
   }
   if (!isOutcome(obj.outcome)) {
     throw new Error(`guardian response missing or invalid outcome: ${String(obj.outcome)}`);

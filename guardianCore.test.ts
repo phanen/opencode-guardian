@@ -51,17 +51,8 @@ function makeDeps(d: Deps) {
         }
       );
     },
-    replyPermission: async (
-      sessionID: string,
-      requestID: string,
-      reply: GuardianReply,
-      message?: string,
-    ) => {
-      replies.push(
-        message !== undefined
-          ? { requestID, reply, message, sessionID }
-          : { requestID, reply, sessionID },
-      );
+    replyPermission: async (sessionID: string, requestID: string, reply: GuardianReply, message?: string) => {
+      replies.push(message !== undefined ? { requestID, reply, message, sessionID } : { requestID, reply, sessionID });
     },
   };
 
@@ -77,10 +68,7 @@ const sampleRequest = {
   always: ["rm -rf build"],
 };
 
-async function emitPermissionAsked(
-  hooks: Awaited<ReturnType<typeof createGuardianHooks>>,
-  req: typeof sampleRequest,
-) {
+async function emitPermissionAsked(hooks: Awaited<ReturnType<typeof createGuardianHooks>>, req: typeof sampleRequest) {
   await hooks.event!({
     event: { type: "permission.asked", properties: req },
   });
@@ -216,13 +204,7 @@ describe("guardianCore — event-driven permission review", () => {
     //   req-4 deny  → reject     (count=2)
     //   req-5 deny  → trip!      (count=3, no reply)
     //   req-6 already tripped, no reply
-    expect(t.replies.map((r) => r.requestID)).toEqual([
-      "req-0",
-      "req-1",
-      "req-2",
-      "req-3",
-      "req-4",
-    ]);
+    expect(t.replies.map((r) => r.requestID)).toEqual(["req-0", "req-1", "req-2", "req-3", "req-4"]);
     expect(t.replies.filter((r) => r.reply === "once")).toHaveLength(1);
     expect(t.replies.filter((r) => r.reply === "reject")).toHaveLength(4);
   });
@@ -237,9 +219,7 @@ describe("guardianCore — event-driven permission review", () => {
       patterns: ["guardian status"],
     });
     expect(t.reviewCalls).toEqual([]);
-    expect(t.replies).toEqual([
-      expect.objectContaining({ requestID: "req-guard", reply: "reject" }),
-    ]);
+    expect(t.replies).toEqual([expect.objectContaining({ requestID: "req-guard", reply: "reject" })]);
   });
 
   test("active-command flag is cleared after /guardian returns (regression)", async () => {
@@ -269,10 +249,7 @@ describe("guardianCore — event-driven permission review", () => {
       { parts: [] },
     );
     const out = { args: { command: "ls" } };
-    await hooks["tool.execute.before"]!(
-      { tool: "bash", sessionID: "ses-cmd-2", callID: "c-1" },
-      out,
-    );
+    await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "ses-cmd-2", callID: "c-1" }, out);
     expect(out.args).toMatchObject({ command: "ls" });
     expect(out.args).not.toMatchObject({ command: ":" });
   });
@@ -331,10 +308,7 @@ describe("guardianCore — event-driven permission review", () => {
     const t = makeDeps({ mode: "user" });
     const hooks = await createGuardianHooks({}, t.deps);
     const out: CommandExecuteBeforeOutput = { parts: [] };
-    await hooks["command.execute.before"]!(
-      { command: "guardian", sessionID: "ses-cmd-3", arguments: "on" },
-      out,
-    );
+    await hooks["command.execute.before"]!({ command: "guardian", sessionID: "ses-cmd-3", arguments: "on" }, out);
     expect(t.getMode()).toBe("auto_review");
     expect(out.parts[0]?.text).toMatch(/auto_review/);
   });

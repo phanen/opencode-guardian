@@ -5,7 +5,15 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "node_modules/**", "coverage/**"],
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      "coverage/**",
+      "scripts/**",
+      ".transformed/**",
+      "debugLog.macro.ts",
+      "vite-ts-macros-plugin.ts",
+    ],
   },
   ...tseslint.configs.recommended,
   {
@@ -13,10 +21,7 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/no-explicit-any": "error",
       "@typescript-eslint/consistent-type-definitions": ["error", "interface"],
-      "@typescript-eslint/no-unused-vars": [
-        "error",
-        { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
-      ],
+      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
       "no-restricted-syntax": [
         "error",
         {
@@ -41,8 +46,7 @@ export default tseslint.config(
         },
         {
           selector: "TSTypeParameterInstantiation > TSTypeLiteral",
-          message:
-            "Do not use inline object type literals in type arguments. Extract to a named type or interface.",
+          message: "Do not use inline object type literals in type arguments. Extract to a named type or interface.",
         },
         {
           selector: "TSTypeAnnotation > TSTupleType",

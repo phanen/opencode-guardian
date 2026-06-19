@@ -15,7 +15,8 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "vitest/globals"],
+    "plugins": [{ "transform": "ts-macros" }]
   },
   "include": [
     "index.ts",
@@ -27,7 +28,11 @@
     "policyConfig.ts",
     "commands.ts",
     "state.ts",
-    "version.ts"
+    "version.ts",
+    "debugLog.macro.ts",
+    "macro-test.ts",
+    "test-rest.macro.ts",
+    "test-rest-call.ts"
   ],
   "exclude": ["node_modules", "dist", "**/*.test.ts", "commands"]
 }

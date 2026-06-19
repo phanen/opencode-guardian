@@ -44,12 +44,7 @@ const allowAssessment: GuardianAssessment = {
 describe("review", () => {
   test("returns parsed assessment on success", async () => {
     const deps = makeDeps(() => allowAssessment);
-    const r = await runGuardianReview(
-      action,
-      transcript,
-      { timeoutMs: 5000, maxAttempts: 1, baseBackoffMs: 10 },
-      deps,
-    );
+    const r = await runGuardianReview(action, transcript, { timeoutMs: 5000, maxAttempts: 1, baseBackoffMs: 10 }, deps);
     expect(r).toEqual(allowAssessment);
   });
 
@@ -71,12 +66,7 @@ describe("review", () => {
         };
       },
     };
-    const r = await runGuardianReview(
-      action,
-      transcript,
-      { timeoutMs: 5000, maxAttempts: 3, baseBackoffMs: 1 },
-      deps,
-    );
+    const r = await runGuardianReview(action, transcript, { timeoutMs: 5000, maxAttempts: 3, baseBackoffMs: 1 }, deps);
     expect(r).toEqual(allowAssessment);
     expect(calls).toBe(2);
   });
@@ -90,12 +80,7 @@ describe("review", () => {
       }),
     };
     await expect(
-      runGuardianReview(
-        action,
-        transcript,
-        { timeoutMs: 5000, maxAttempts: 2, baseBackoffMs: 1 },
-        deps,
-      ),
+      runGuardianReview(action, transcript, { timeoutMs: 5000, maxAttempts: 2, baseBackoffMs: 1 }, deps),
     ).rejects.toBeInstanceOf(GuardianReviewError);
   });
 
@@ -111,12 +96,7 @@ describe("review", () => {
       },
     };
     await expect(
-      runGuardianReview(
-        action,
-        transcript,
-        { timeoutMs: 10, maxAttempts: 1, baseBackoffMs: 1 },
-        deps,
-      ),
+      runGuardianReview(action, transcript, { timeoutMs: 10, maxAttempts: 1, baseBackoffMs: 1 }, deps),
     ).rejects.toMatchObject({ kind: "timeout" });
   });
 
@@ -134,13 +114,7 @@ describe("review", () => {
       },
     };
     await expect(
-      runGuardianReview(
-        action,
-        transcript,
-        { timeoutMs: 1000, maxAttempts: 1, baseBackoffMs: 1 },
-        deps,
-        ac.signal,
-      ),
+      runGuardianReview(action, transcript, { timeoutMs: 1000, maxAttempts: 1, baseBackoffMs: 1 }, deps, ac.signal),
     ).rejects.toMatchObject({ kind: "cancelled" });
   });
 
@@ -161,12 +135,7 @@ describe("review", () => {
         };
       },
     };
-    const r = await runGuardianReview(
-      action,
-      transcript,
-      { timeoutMs: 5000, maxAttempts: 3, baseBackoffMs: 1 },
-      deps,
-    );
+    const r = await runGuardianReview(action, transcript, { timeoutMs: 5000, maxAttempts: 3, baseBackoffMs: 1 }, deps);
     expect(r.outcome).toBe("allow");
     expect(createCount).toBe(1);
     expect(promptCount).toBe(2);

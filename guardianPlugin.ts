@@ -19,7 +19,10 @@ import type {
   SessionPromptResponse,
   SdkClientWithPermissionReply,
 } from "./types";
-import { textFromParts } from "./utils";
+// `debugLog` is the runtime target of the $log! macro below.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { debugLog, textFromParts } from "./utils";
+import { $log } from "./debugLog.macro";
 
 type SdkClient = PluginInput["client"];
 type ExtendedSdkClient = SdkClient & SdkClientWithPermissionReply;
@@ -33,11 +36,7 @@ function resolveStatePath(ctx: PluginInput): string {
   return path.join(root, ".guardian.json");
 }
 
-async function loadTranscript(
-  ctx: PluginInput,
-  sessionID: string,
-  limit: number,
-): Promise<GuardianTranscriptEntry[]> {
+async function loadTranscript(ctx: PluginInput, sessionID: string, limit: number): Promise<GuardianTranscriptEntry[]> {
   try {
     const result = (await ctx.client.session.messages({
       path: { id: sessionID },
@@ -76,17 +75,7 @@ async function replyPermission(
   reply: GuardianReply,
   message?: string,
 ): Promise<void> {
-  const { appendFileSync } = await import("node:fs");
-  const log = (msg: string) => {
-    try {
-      appendFileSync(
-        "/tmp/guardian-debug.log",
-        `${new Date().toISOString()} [GUARDIAN-REPLY] ${msg}\n`,
-      );
-    } catch {}
-  };
-
-  log(`request_id=${requestID} session_id=${sessionID} reply=${reply} transport=sdk_client`);
+  $log!("REPLY", requestID, sessionID, reply, "transport=sdk_client");
 
   // MUST use the SDK client, not Node `fetch`. The plugin runs inside the
   // TUI/server process and ctx.client is created with `fetch: app.fetch`
@@ -99,9 +88,8 @@ async function replyPermission(
   // like `const m = ctx.client.post...; m(...)` — because the SDK method
   // reads `this._client` internally and the binding is lost on extraction.
   const sdkClient = ctx.client as ExtendedSdkClient;
-  const sdkMethod = sdkClient.postSessionIdPermissionsPermissionId;
-  if (!sdkMethod) {
-    log(`request_id=${requestID} outcome=missing_sdk_method`);
+  if (!sdkClient.postSessionIdPermissionsPermissionId) {
+    $log!("REPLY", requestID, "missing_sdk_method");
     throw new Error("opencode SDK does not expose postSessionIdPermissionsPermissionId");
   }
 
@@ -110,26 +98,28 @@ async function replyPermission(
 
   const t0 = Date.now();
   try {
-    const result = await sdkMethod({
+    // Must call through the client object so the SDK method's `this`
+    // binding is preserved; hoisting it to a local breaks the call.
+    const result = await sdkClient.postSessionIdPermissionsPermissionId({
       body,
       path: { id: sessionID, permissionID: requestID },
       query: ctx.directory ? { directory: ctx.directory } : undefined,
     });
     const elapsed = Date.now() - t0;
     const status = extractStatus(result);
-    log(`request_id=${requestID} response status=${status} elapsed_ms=${elapsed}`);
-    log(`request_id=${requestID} outcome=success status=${status}`);
+    $log!("REPLY", requestID, status, elapsed);
+    $log!("REPLY", requestID, "success", status);
   } catch (err) {
     const loggedErr = err as LoggedError;
     const status = extractStatus(loggedErr);
-    const responseBody = loggedErr.response
-      ? await loggedErr.response.text().catch(() => "(unreadable)")
-      : "";
-    log(
-      `request_id=${requestID} sdk_error status=${status} body=${responseBody.slice(0, 500)} message=${loggedErr.message}`,
-    );
+    const responseBody = loggedErr.response ? await loggedErr.response.text().catch(() => "(unreadable)") : "";
+
+    const sdkError = true;
+    const body = responseBody.slice(0, 500);
+    const message = loggedErr.message;
+    $log!("REPLY", requestID, sdkError, status, body, message);
     if (status === 404) {
-      log(`request_id=${requestID} outcome=404_benign (request already gone from pending)`);
+      $log!("REPLY", requestID, "404_benign");
       return;
     }
     throw err;
