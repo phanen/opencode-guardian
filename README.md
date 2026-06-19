@@ -21,6 +21,7 @@ Switch at runtime:
 - `/guardian` - toggle user <-> auto_review
 - `/guardian on` or `/guardian auto_review` - enable auto-review
 - `/guardian off` or `/guardian user` - disable
+- `/guardian skip` or `/guardian dangerously_skip` - auto-allow every approval without LLM review (escape hatch)
 - `/guardian status` - show current mode
 - `/guardian start` - emit a kickoff message (useful after enabling)
 
