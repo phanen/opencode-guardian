@@ -108,8 +108,11 @@ async function replyPermission(
   // that owns the pending map. Plain Node fetch would go to the URL the
   // server is listening on, which (when running standalone TUI) is a
   // different process's server with an empty pending map — returning 404.
-  const sdkMethod = ctx.client.postSessionIdPermissionsPermissionId;
-  if (!sdkMethod) {
+  //
+  // Must invoke through ctx.client.<method>(...) — NOT a hoisted reference
+  // like `const m = ctx.client.post...; m(...)` — because the SDK method
+  // reads `this._client` internally and the binding is lost on extraction.
+  if (!ctx.client.postSessionIdPermissionsPermissionId) {
     log(`request_id=${requestID} outcome=missing_sdk_method`);
     throw new Error("opencode SDK does not expose postSessionIdPermissionsPermissionId");
   }
@@ -119,7 +122,7 @@ async function replyPermission(
 
   const t0 = Date.now();
   try {
-    const result = await sdkMethod({
+    const result = await ctx.client.postSessionIdPermissionsPermissionId({
       body,
       path: { id: sessionID, permissionID: requestID },
       query: ctx.directory ? { directory: ctx.directory } : undefined,
