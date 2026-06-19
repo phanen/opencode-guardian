@@ -16,6 +16,11 @@ interface PluginCtx {
       prompt: (opts: any) => Promise<{ data?: { info: any; parts: any[] } }>;
       messages: (opts: any) => Promise<{ data?: Array<{ info: any; parts: any[] }> }>;
       abort?: (opts: any) => Promise<unknown>;
+      postSessionIdPermissionsPermissionId?: (opts: {
+        body: { response: "once" | "always" | "reject"; message?: string };
+        path: { id: string; permissionID: string };
+        query?: { directory?: string };
+      }) => Promise<unknown>;
     };
   };
   directory: string;
@@ -34,22 +39,9 @@ function resolveStatePath(ctx: PluginCtx): string {
 }
 
 function resolveServerUrl(ctx: PluginCtx): string {
-  const { appendFileSync } = require("node:fs") as typeof import("node:fs");
-  const url = (() => {
-    if (!ctx.serverUrl) return "http://localhost:4096";
-    if (typeof ctx.serverUrl === "string") return ctx.serverUrl;
-    return ctx.serverUrl.toString().replace(/\/+$/, "");
-  })();
-  // Diagnostic: log the URL resolution so we can verify we hit the right server
-  try {
-    appendFileSync(
-      "/tmp/guardian-debug.log",
-      `${new Date().toISOString()} [GUARDIAN-REPLY] resolveServerUrl ctx_serverUrl=${
-        ctx.serverUrl ? (typeof ctx.serverUrl === "string" ? ctx.serverUrl : ctx.serverUrl.toString()) : "(undefined)"
-      } resolved=${url}\n`,
-    );
-  } catch {}
-  return url;
+  if (!ctx.serverUrl) return "http://localhost:4096";
+  if (typeof ctx.serverUrl === "string") return ctx.serverUrl;
+  return ctx.serverUrl.toString().replace(/\/+$/, "");
 }
 
 function textFromParts(parts: Array<{ type?: string; text?: string }> = []): string {
@@ -98,25 +90,6 @@ async function replyPermission(
   reply: GuardianReply,
   message?: string,
 ): Promise<void> {
-  const base = resolveServerUrl(ctx);
-  const params = new URLSearchParams();
-  if (ctx.directory) params.set("directory", ctx.directory);
-  if (ctx.project?.workspaceID) params.set("workspace", ctx.project.workspaceID);
-  const qs = params.toString();
-
-  // Use the deprecated session-scoped endpoint that opencode.nvim hits.
-  // Same server-side handler (Permission.reply) as the v2
-  // /permission/{requestID}/reply endpoint, just a different URL
-  // shape with sessionID in the path and `response` in the body.
-  const url =
-    `${base}/session/${encodeURIComponent(sessionID)}` +
-    `/permissions/${encodeURIComponent(requestID)}` +
-    `${qs ? `?${qs}` : ""}`;
-  const body: { response: GuardianReply; message?: string } = { response: reply };
-  if (message) body.message = message;
-
-  // Verbose diagnostic logging — full URL, full body, full response
-  // status and body so we can compare against opencode.nvim's behavior.
   const { appendFileSync } = await import("node:fs");
   const log = (msg: string) => {
     try {
@@ -127,45 +100,46 @@ async function replyPermission(
     } catch {}
   };
 
-  log(`request_id=${requestID} session_id=${sessionID} reply=${reply}`);
-  log(`request_id=${requestID} url=${url}`);
-  log(`request_id=${requestID} body=${JSON.stringify(body)}`);
+  log(`request_id=${requestID} session_id=${sessionID} reply=${reply} transport=sdk_client`);
+
+  // MUST use the SDK client, not Node `fetch`. The plugin runs inside the
+  // TUI/server process and ctx.client is created with `fetch: app.fetch`
+  // (Server.Default().app.fetch) so the POST hits the in-process server
+  // that owns the pending map. Plain Node fetch would go to the URL the
+  // server is listening on, which (when running standalone TUI) is a
+  // different process's server with an empty pending map — returning 404.
+  const sdkMethod = ctx.client.session.postSessionIdPermissionsPermissionId;
+  if (!sdkMethod) {
+    log(`request_id=${requestID} outcome=missing_sdk_method`);
+    throw new Error("opencode SDK does not expose postSessionIdPermissionsPermissionId");
+  }
+
+  const body: { response: GuardianReply; message?: string } = { response: reply };
+  if (message) body.message = message;
 
   const t0 = Date.now();
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+    const result = await sdkMethod({
+      body,
+      path: { id: sessionID, permissionID: requestID },
+      query: ctx.directory ? { directory: ctx.directory } : undefined,
     });
     const elapsed = Date.now() - t0;
-    const text = await res.text();
-    log(
-      `request_id=${requestID} response status=${res.status} ok=${res.ok} ` +
-        `elapsed_ms=${elapsed} content-type=${res.headers.get("content-type") ?? "(none)"} ` +
-        `body=${text.slice(0, 500)}`,
-    );
-    log(
-      `request_id=${requestID} response_headers=${JSON.stringify(
-        Object.fromEntries(res.headers.entries()),
-      )}`,
-    );
-    if (res.status === 404) {
-      // request already resolved by the user, or the parent fiber was
-      // interrupted and the Effect.ensuring cleanup cleared it from
-      // pending without firing permission.replied. The TUI's local
-      // store still has the request, so the dialog stays. Benign from
-      // the plugin's perspective — we tried.
+    const status = (result as { response?: Response; status?: number })?.status
+      ?? (result as { response?: Response })?.response?.status
+      ?? "(unknown)";
+    log(`request_id=${requestID} response status=${status} elapsed_ms=${elapsed}`);
+    log(`request_id=${requestID} outcome=success status=${status}`);
+  } catch (err) {
+    const status = (err as { response?: Response; status?: number })?.status
+      ?? (err as { response?: Response })?.response?.status
+      ?? "(none)";
+    const body = await (err as { response?: Response })?.response?.text?.().catch(() => "(unreadable)") ?? "";
+    log(`request_id=${requestID} sdk_error status=${status} body=${body.slice(0, 500)} message=${(err as Error).message}`);
+    if (status === 404) {
       log(`request_id=${requestID} outcome=404_benign (request already gone from pending)`);
       return;
     }
-    if (!res.ok) {
-      log(`request_id=${requestID} outcome=http_error status=${res.status}`);
-      throw new Error(`permission.reply failed: ${res.status} ${text}`);
-    }
-    log(`request_id=${requestID} outcome=success status=${res.status}`);
-  } catch (err) {
-    log(`request_id=${requestID} fetch_error=${(err as Error).message}`);
     throw err;
   }
 }
