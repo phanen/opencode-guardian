@@ -324,6 +324,15 @@ export async function createGuardianHooks(
         "elapsed_ms=",
         Date.now() - t0,
       );
+      // DEBUG: artificial delay to test whether pending is cleared by an
+      // opencode-internal race. If a 2s delay flips 404 -> 200, the 13ms
+      // sync reply is racing with the parent fiber's interruption of
+      // Permission.ask. Delete this block once the root cause is known.
+      const skipDelayMs = Number(process.env.GUARDIAN_SKIP_DELAY_MS ?? 0);
+      if (skipDelayMs > 0) {
+        guardianLog("[SKIP-SYNC] sleeping", skipDelayMs, "ms before reply");
+        await new Promise((r) => setTimeout(r, skipDelayMs));
+      }
       try {
         await deps.replyPermission(req.sessionID, req.id, "once");
         guardianLog(
