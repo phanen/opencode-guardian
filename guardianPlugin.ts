@@ -38,12 +38,6 @@ function resolveStatePath(ctx: PluginCtx): string {
   return path.join(root, ".guardian.json");
 }
 
-function resolveServerUrl(ctx: PluginCtx): string {
-  if (!ctx.serverUrl) return "http://localhost:4096";
-  if (typeof ctx.serverUrl === "string") return ctx.serverUrl;
-  return ctx.serverUrl.toString().replace(/\/+$/, "");
-}
-
 function textFromParts(parts: Array<{ type?: string; text?: string }> = []): string {
   return parts
     .filter((p) => p.type === "text" && typeof p.text === "string")

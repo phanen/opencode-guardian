@@ -308,9 +308,10 @@ export async function createGuardianHooks(
     }
 
     // In `dangerously_skip` mode, immediately reply "once" without LLM.
-    // This is the test branch to verify whether sync reply (no LLM latency)
-    // beats the parent-fiber interrupt in opencode. If this gets 200 from
-    // the server, the LLM is the only thing keeping auto_review from working.
+    // Bypasses risk assessment for commands the user has marked as
+    // unconditionally safe (or as an escape hatch when the LLM review
+    // path is broken). Keeps the same [SKIP-SYNC] log lines for parity
+    // with the LLM-driven branch.
     if (mode === "dangerously_skip") {
       guardianLog(
         "[SKIP-SYNC] request=",
@@ -324,15 +325,6 @@ export async function createGuardianHooks(
         "elapsed_ms=",
         Date.now() - t0,
       );
-      // DEBUG: artificial delay to test whether pending is cleared by an
-      // opencode-internal race. If a 2s delay flips 404 -> 200, the 13ms
-      // sync reply is racing with the parent fiber's interruption of
-      // Permission.ask. Delete this block once the root cause is known.
-      const skipDelayMs = Number(process.env.GUARDIAN_SKIP_DELAY_MS ?? 0);
-      if (skipDelayMs > 0) {
-        guardianLog("[SKIP-SYNC] sleeping", skipDelayMs, "ms before reply");
-        await new Promise((r) => setTimeout(r, skipDelayMs));
-      }
       try {
         await deps.replyPermission(req.sessionID, req.id, "once");
         guardianLog(
