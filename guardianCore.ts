@@ -206,7 +206,9 @@ export async function createGuardianHooks(
     "cwd=",
     PROCESS_CWD,
     "guardian_model=",
-    options.guardianModel ? `${options.guardianModel.providerID}/${options.guardianModel.modelID}` : "(default)",
+    options.guardianModel
+      ? `${options.guardianModel.providerID}/${options.guardianModel.modelID}`
+      : "(default)",
     "timeoutMs=",
     options.timeoutMs ?? 90_000,
     "max_consecutive_denials=",
@@ -258,7 +260,12 @@ export async function createGuardianHooks(
         JSON.stringify(patterns),
       );
       try {
-        await deps.replyPermission(req.sessionID, req.id, "reject", "bash invocation of guardian is not allowed");
+        await deps.replyPermission(
+          req.sessionID,
+          req.id,
+          "reject",
+          "bash invocation of guardian is not allowed",
+        );
       } catch (err) {
         guardianLog("[DENY-LOCAL] reply failed:", req.id, String(err));
       }
@@ -327,12 +334,7 @@ export async function createGuardianHooks(
       );
       try {
         await deps.replyPermission(req.sessionID, req.id, "once");
-        guardianLog(
-          "[SKIP-SYNC] reply sent request=",
-          req.id,
-          "elapsed_ms=",
-          Date.now() - t0,
-        );
+        guardianLog("[SKIP-SYNC] reply sent request=", req.id, "elapsed_ms=", Date.now() - t0);
       } catch (err) {
         guardianLog("[SKIP-SYNC] reply failed:", req.id, String(err));
       }

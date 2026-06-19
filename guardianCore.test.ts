@@ -95,9 +95,7 @@ describe("guardianCore — event-driven permission review", () => {
     const hooks = await createGuardianHooks({}, t.deps);
     await emitPermissionAsked(hooks, { ...sampleRequest, id: "req-skip" });
     expect(t.reviewCalls).toEqual([]);
-    expect(t.replies).toEqual([
-      expect.objectContaining({ requestID: "req-skip", reply: "once" }),
-    ]);
+    expect(t.replies).toEqual([expect.objectContaining({ requestID: "req-skip", reply: "once" })]);
   });
 
   test("auto_review + allow → reply once", async () => {

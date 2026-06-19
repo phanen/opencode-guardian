@@ -122,17 +122,23 @@ async function replyPermission(
       query: ctx.directory ? { directory: ctx.directory } : undefined,
     });
     const elapsed = Date.now() - t0;
-    const status = (result as { response?: Response; status?: number })?.status
-      ?? (result as { response?: Response })?.response?.status
-      ?? "(unknown)";
+    const status =
+      (result as { response?: Response; status?: number })?.status ??
+      (result as { response?: Response })?.response?.status ??
+      "(unknown)";
     log(`request_id=${requestID} response status=${status} elapsed_ms=${elapsed}`);
     log(`request_id=${requestID} outcome=success status=${status}`);
   } catch (err) {
-    const status = (err as { response?: Response; status?: number })?.status
-      ?? (err as { response?: Response })?.response?.status
-      ?? "(none)";
-    const body = await (err as { response?: Response })?.response?.text?.().catch(() => "(unreadable)") ?? "";
-    log(`request_id=${requestID} sdk_error status=${status} body=${body.slice(0, 500)} message=${(err as Error).message}`);
+    const status =
+      (err as { response?: Response; status?: number })?.status ??
+      (err as { response?: Response })?.response?.status ??
+      "(none)";
+    const body =
+      (await (err as { response?: Response })?.response?.text?.().catch(() => "(unreadable)")) ??
+      "";
+    log(
+      `request_id=${requestID} sdk_error status=${status} body=${body.slice(0, 500)} message=${(err as Error).message}`,
+    );
     if (status === 404) {
       log(`request_id=${requestID} outcome=404_benign (request already gone from pending)`);
       return;

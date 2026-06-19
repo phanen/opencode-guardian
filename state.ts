@@ -13,9 +13,7 @@ interface StateFile {
 export type GuardianMode = "user" | "auto_review" | "dangerously_skip";
 
 function isGuardianMode(value: unknown): value is GuardianMode {
-  return (
-    value === "user" || value === "auto_review" || value === "dangerously_skip"
-  );
+  return value === "user" || value === "auto_review" || value === "dangerously_skip";
 }
 
 export async function readMode(
