@@ -69,6 +69,14 @@ export interface GuardianRuntimeDeps {
     transcript: GuardianTranscriptEntry[],
     signal?: AbortSignal,
   ) => Promise<GuardianQuestionDecision>;
+  /**
+   * Tear down all cached guardian review sessions (one per parent
+   * agent session). Called on mode change so a switch between
+   * `user` / `auto_review` / `dangerously_skip` does not leave a
+   * trunk behind that no longer matches the new mode's policy.
+   * The implementation should not throw on individual delete failures.
+   */
+  invalidateReviewTrunks: () => Promise<void>;
 }
 
 const DEFAULT_TRANSCRIPT_CACHE_LIMIT = 40;
@@ -483,6 +491,10 @@ export async function createGuardianHooks(options: GuardianOptions, deps: Guardi
             mode = result.mode;
             const argsJson = JSON.stringify(input.arguments);
             $log!("MODE-CHANGE", input.sessionID, "via=command", result.mode, argsJson);
+            // Trunk sessions only make sense while auto_review is
+            // active. Tear them down on any mode switch so the next
+            // review creates a fresh trunk under the new policy.
+            await deps.invalidateReviewTrunks();
           }
           text =
             result.handled && result.mode
@@ -524,6 +536,7 @@ export async function createGuardianHooks(options: GuardianOptions, deps: Guardi
         mode = result.mode;
         const triggerJson = JSON.stringify(text.slice(0, 80));
         $log!("[MODE-CHANGE]", output.message?.sessionID ?? "(unknown)", "via=chat", result.mode, triggerJson);
+        await deps.invalidateReviewTrunks();
       }
     },
 

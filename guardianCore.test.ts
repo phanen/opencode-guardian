@@ -24,6 +24,11 @@ interface QuestionRejectCall {
   requestID: string;
 }
 
+interface TrunkInvalidateCall {
+  // Count of invalidateReviewTrunks invocations. The dep has no args.
+  count: number;
+}
+
 interface Deps {
   mode: GuardianMode;
   decisions?: GuardianAssessment[];
@@ -42,6 +47,7 @@ function makeDeps(d: Deps) {
   const questionAnswers: QuestionAnswerCall[] = [];
   const questionRejects: QuestionRejectCall[] = [];
   const questionReviewCalls: Array<QuestionAskedRequest> = [];
+  const trunkInvalidations: TrunkInvalidateCall[] = [];
 
   const deps = {
     readMode: async () => mode,
@@ -81,6 +87,9 @@ function makeDeps(d: Deps) {
       const next = d.questionDecisions?.shift();
       return next ?? { action: "answer", answers: request.questions.map((q) => [q.options[0]?.label ?? ""]) };
     },
+    invalidateReviewTrunks: async () => {
+      trunkInvalidations.push({ count: 1 });
+    },
   };
 
   return {
@@ -92,6 +101,7 @@ function makeDeps(d: Deps) {
     questionAnswers,
     questionRejects,
     questionReviewCalls,
+    trunkInvalidations,
     getMode: () => mode,
   };
 }
@@ -371,6 +381,15 @@ describe("guardianCore — event-driven permission review", () => {
     expect(out.parts[0]?.text).toMatch(/auto_review/);
   });
 
+  test("/guardian mode switch invalidates cached review trunks", async () => {
+    const t = makeDeps({ mode: "user" });
+    const hooks = await createGuardianHooks({}, t.deps);
+    expect(t.trunkInvalidations).toHaveLength(0);
+    const out: CommandExecuteBeforeOutput = { parts: [] };
+    await hooks["command.execute.before"]!({ command: "guardian", sessionID: "ses-cmd-3", arguments: "on" }, out);
+    expect(t.trunkInvalidations).toHaveLength(1);
+  });
+
   test("chat.message /guardian fallback updates mode", async () => {
     const t = makeDeps({ mode: "user" });
     const hooks = await createGuardianHooks({}, t.deps);
@@ -382,6 +401,29 @@ describe("guardianCore — event-driven permission review", () => {
       },
     );
     expect(t.getMode()).toBe("auto_review");
+  });
+
+  test("chat.message /guardian fallback invalidates cached review trunks", async () => {
+    const t = makeDeps({ mode: "user" });
+    const hooks = await createGuardianHooks({}, t.deps);
+    expect(t.trunkInvalidations).toHaveLength(0);
+    await hooks["chat.message"]!(
+      { sessionID: "ses-x" },
+      {
+        message: { id: "u-1", sessionID: "ses-x", role: "user" },
+        parts: [{ type: "text", text: "/guardian on" }],
+      },
+    );
+    expect(t.trunkInvalidations).toHaveLength(1);
+  });
+
+  test("unknown /guardian argument does not invalidate trunks", async () => {
+    const t = makeDeps({ mode: "user" });
+    const hooks = await createGuardianHooks({}, t.deps);
+    const out: CommandExecuteBeforeOutput = { parts: [] };
+    await hooks["command.execute.before"]!({ command: "guardian", sessionID: "ses-cmd-3", arguments: "nope" }, out);
+    expect(t.getMode()).toBe("user");
+    expect(t.trunkInvalidations).toHaveLength(0);
   });
 
   test("session.idle event clears the circuit breaker for that session", async () => {

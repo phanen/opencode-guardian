@@ -7,15 +7,16 @@ import {
   type GuardianRuntimeDeps,
 } from "./guardianCore";
 import type { GuardianAction, GuardianTranscriptEntry } from "./prompt";
-import type { GuardianReviewOptions } from "./review";
+import type { GuardianReviewOptions, PromptBody } from "./review";
 import { runGuardianQuestionReview, runGuardianReview } from "./review";
 import { type GuardianMode, readMode, writeMode } from "./state";
+import { GuardianTrunkManager, createTrunkFactoryFromSdk } from "./guardianTrunk";
 import type {
   LoggedError,
   PermissionReplyBody,
   QuestionAskedRequest,
   RequestResult,
-  SessionCreateResponse,
+  SessionAdminClient,
   SessionMessagesResponse,
   SessionPromptResponse,
   SdkClientWithPermissionReply,
@@ -27,7 +28,7 @@ import { debugLog, textFromParts } from "./utils";
 import { $log } from "./debugLog.macro";
 
 type SdkClient = PluginInput["client"];
-type ExtendedSdkClient = SdkClient & SdkClientWithPermissionReply;
+type ExtendedSdkClient = SdkClient & SdkClientWithPermissionReply & SessionAdminClient;
 
 export type GuardianPluginOptions = GuardianOptions & {
   mode?: GuardianMode;
@@ -230,85 +231,54 @@ export default async function GuardianPlugin(
 
   const sdkClient = ctx.client as ExtendedSdkClient;
 
+  const trunkManager = new GuardianTrunkManager({
+    factory: createTrunkFactoryFromSdk(sdkClient, "guardian-review", (msg) => $log!("TRUNK", msg)),
+    title: "guardian-review",
+  });
+
+  const reviewDeps = {
+    prompt: async (sessionID: string, body: PromptBody) => {
+      const res = (await sdkClient.session.prompt({
+        path: { id: sessionID },
+        body: {
+          system: body.system,
+          parts: body.parts,
+          model: body.model,
+          noReply: body.noReply,
+        },
+      })) as SessionPromptResponse;
+      const data = res?.data;
+      return {
+        info: data?.info ?? { id: "", sessionID, role: "assistant" },
+        parts: data?.parts ?? [],
+      };
+    },
+    abortSession: async (sessionID: string) => {
+      try {
+        await sdkClient.session.abort?.({ path: { id: sessionID } });
+      } catch {
+        // ignore
+      }
+    },
+  };
+
   const deps: GuardianRuntimeDeps = {
     readMode: () => readMode(options.mode ?? "user", statePath),
     writeMode: (mode) => writeMode(mode, statePath),
     loadTranscript: (sessionID, limit) => loadTranscript(ctx, sessionID, limit),
     runReview: async (action: GuardianAction, transcript: GuardianTranscriptEntry[]) => {
-      const assessment = await runGuardianReview(action, transcript, reviewOptions, {
-        createSession: async (parentID: string) => {
-          const res = (await sdkClient.session.create({
-            body: { parentID, title: "guardian-review" },
-          })) as SessionCreateResponse;
-          const id = res?.data?.id;
-          if (!id) throw new Error("createSession returned no id");
-          return { id };
-        },
-        prompt: async (sessionID, body) => {
-          const res = (await sdkClient.session.prompt({
-            path: { id: sessionID },
-            body: {
-              system: body.system,
-              parts: body.parts,
-              model: body.model,
-              noReply: body.noReply,
-            },
-          })) as SessionPromptResponse;
-          const data = res?.data;
-          return {
-            info: data?.info ?? { id: "", sessionID, role: "assistant" },
-            parts: data?.parts ?? [],
-          };
-        },
-        abortSession: async (sessionID) => {
-          try {
-            await sdkClient.session.abort?.({ path: { id: sessionID } });
-          } catch {
-            // ignore
-          }
-        },
-      });
-      return assessment;
+      const sessionID = await trunkManager.getOrCreate(action.sessionID);
+      return runGuardianReview(action, transcript, reviewOptions, reviewDeps, undefined, { sessionID });
     },
     replyPermission: async (sessionID, requestID, reply, message) =>
       replyPermission(ctx, sessionID, requestID, reply, message),
     replyQuestion: async (sessionID, requestID, answers) => replyQuestion(ctx, sessionID, requestID, answers),
     rejectQuestion: async (sessionID, requestID) => rejectQuestion(ctx, sessionID, requestID),
     runQuestionReview: async (request: QuestionAskedRequest, transcript: GuardianTranscriptEntry[]) => {
-      return runGuardianQuestionReview(request, transcript, reviewOptions, {
-        createSession: async (parentID: string) => {
-          const res = (await sdkClient.session.create({
-            body: { parentID, title: "guardian-review" },
-          })) as SessionCreateResponse;
-          const id = res?.data?.id;
-          if (!id) throw new Error("createSession returned no id");
-          return { id };
-        },
-        prompt: async (sessionID, body) => {
-          const res = (await sdkClient.session.prompt({
-            path: { id: sessionID },
-            body: {
-              system: body.system,
-              parts: body.parts,
-              model: body.model,
-              noReply: body.noReply,
-            },
-          })) as SessionPromptResponse;
-          const data = res?.data;
-          return {
-            info: data?.info ?? { id: "", sessionID, role: "assistant" },
-            parts: data?.parts ?? [],
-          };
-        },
-        abortSession: async (sessionID) => {
-          try {
-            await sdkClient.session.abort?.({ path: { id: sessionID } });
-          } catch {
-            // ignore
-          }
-        },
-      });
+      const sessionID = await trunkManager.getOrCreate(request.sessionID);
+      return runGuardianQuestionReview(request, transcript, reviewOptions, reviewDeps, undefined, { sessionID });
     },
+    invalidateReviewTrunks: () => trunkManager.invalidateAll(),
   };
 
   return createGuardianHooks(options, deps);

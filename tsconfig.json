@@ -22,6 +22,7 @@
     "index.ts",
     "guardianPlugin.ts",
     "guardianCore.ts",
+    "guardianTrunk.ts",
     "review.ts",
     "prompt.ts",
     "policyTemplate.ts",

@@ -146,3 +146,32 @@ export interface SdkRawPostOptions {
 export interface SdkClientWithRawPost {
   _client: SdkRawPostCall;
 }
+
+// Minimal shape the trunk manager needs from the SDK. Mirrors
+// `client.session.create / .delete` so the manager can be tested without
+// the full OpencodeClient.
+export interface SessionCreateBody {
+  parentID?: string;
+  title?: string;
+}
+
+export interface SessionCreateArgs {
+  body?: SessionCreateBody;
+}
+
+export interface SessionDeletePath {
+  id: string;
+}
+
+export interface SessionDeleteArgs {
+  path: SessionDeletePath;
+}
+
+export interface SessionAdminSession {
+  create?: (args: SessionCreateArgs) => Promise<unknown>;
+  delete?: (args: SessionDeleteArgs) => Promise<unknown>;
+}
+
+export interface SessionAdminClient {
+  session: SessionAdminSession;
+}

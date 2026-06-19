@@ -28,9 +28,13 @@ export interface GuardianReviewOptions {
 }
 
 export interface GuardianReviewerDeps {
-  createSession: (parentID: string) => Promise<SessionId>;
+  createSession?: (parentID: string) => Promise<SessionId>;
   prompt: (sessionID: string, body: PromptBody) => Promise<AssistantMessageWithParts>;
   abortSession?: (sessionID: string) => Promise<void>;
+}
+
+export interface GuardianReviewRunOptions {
+  sessionID?: string;
 }
 
 export interface PromptBody {
@@ -80,13 +84,14 @@ export async function runGuardianReview(
   options: GuardianReviewOptions,
   deps: GuardianReviewerDeps,
   signal?: AbortSignal,
+  runOptions?: GuardianReviewRunOptions,
 ): Promise<GuardianDecision> {
   const userContent = buildGuardianUserContent(action, transcript);
   const parts = buildGuardianPromptParts(action, transcript);
   const systemPrompt = parts.system;
   const deadline = Date.now() + options.timeoutMs;
 
-  let sessionID: string | undefined;
+  let sessionID: string | undefined = runOptions?.sessionID;
   let lastError: GuardianReviewError | undefined;
 
   for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
@@ -105,6 +110,12 @@ export async function runGuardianReview(
 
     try {
       if (!sessionID) {
+        if (!deps.createSession) {
+          throw new GuardianReviewError(
+            "session_create_failed",
+            "createSession dep is required when no sessionID is provided",
+          );
+        }
         try {
           const created = await deps.createSession(action.sessionID);
           sessionID = created.id;
@@ -182,13 +193,14 @@ export async function runGuardianQuestionReview(
   options: GuardianReviewOptions,
   deps: GuardianReviewerDeps,
   signal?: AbortSignal,
+  runOptions?: GuardianReviewRunOptions,
 ): Promise<GuardianQuestionDecision> {
   const userContent = buildQuestionUserContent(request, transcript);
   const parts = buildQuestionPromptParts(request, transcript);
   const systemPrompt = parts.system;
   const deadline = Date.now() + options.timeoutMs;
 
-  let sessionID: string | undefined;
+  let sessionID: string | undefined = runOptions?.sessionID;
   let lastError: GuardianReviewError | undefined;
 
   for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
@@ -207,6 +219,12 @@ export async function runGuardianQuestionReview(
 
     try {
       if (!sessionID) {
+        if (!deps.createSession) {
+          throw new GuardianReviewError(
+            "session_create_failed",
+            "createSession dep is required when no sessionID is provided",
+          );
+        }
         try {
           const created = await deps.createSession(request.sessionID);
           sessionID = created.id;
