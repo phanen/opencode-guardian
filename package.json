@@ -14,10 +14,10 @@
     "typecheck": "tsc --noEmit",
     "format": "biome format --write",
     "format:check": "biome format",
-    "lint": "biome lint",
-    "lint:fix": "biome lint --write",
-    "check": "biome check",
-    "check:fix": "biome check --write"
+    "lint": "biome lint && eslint .",
+    "lint:fix": "biome lint --write && eslint . --fix",
+    "check": "npm run format:check && npm run lint",
+    "check:fix": "npm run format && npm run lint:fix"
   },
   "keywords": [
     "opencode",
@@ -46,9 +46,14 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",
+    "@kongyo2/similarity-ts": "^0.4.1",
     "@opencode-ai/plugin": ">=0.13.7",
     "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.61.1",
+    "@typescript-eslint/parser": "^8.61.1",
+    "eslint": "^10.5.0",
     "typescript": "^5.9.3",
+    "typescript-eslint": "^8.61.1",
     "vitest": "^3.2.4"
   },
   "dependencies": {

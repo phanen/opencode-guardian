@@ -1,9 +1,15 @@
 import { appendFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import type { Hooks } from "@opencode-ai/plugin";
+import type { Part, TextPart } from "@opencode-ai/sdk";
 import { maybeHandleGuardianCommand, statusLineFor } from "./commands";
 import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
 import { GuardianReviewError } from "./review";
 import type { GuardianMode } from "./state";
+import type { ModelRef, PermissionAskedRequest, RawEvent } from "./types";
+
+// Re-export for plugin consumers.
+export type { PermissionAskedRequest } from "./types";
 
 const YOLO_DEBUG_LOG = "/tmp/guardian-debug.log";
 
@@ -27,7 +33,7 @@ function guardianLog(...args: unknown[]) {
 
 export interface GuardianOptions {
   mode?: GuardianMode;
-  guardianModel?: { providerID: string; modelID: string };
+  guardianModel?: ModelRef;
   timeoutMs?: number;
   maxAttempts?: number;
   baseBackoffMs?: number;
@@ -61,42 +67,6 @@ export interface GuardianRuntimeDeps {
     reply: GuardianReply,
     message?: string,
   ) => Promise<void>;
-}
-
-/**
- * Shape of the `permission.asked` event published by opencode's
- * Permission.ask service. Mirrors `PermissionV1.Request` in the opencode
- * source — kept as a structural type so this plugin does not depend on the
- * internal SDK package.
- */
-export interface PermissionAskedRequest {
-  id: string;
-  sessionID: string;
-  permission: string;
-  patterns: string[];
-  metadata?: Record<string, unknown>;
-  always?: string[];
-  tool?: { messageID: string; callID: string };
-}
-
-export interface Hooks {
-  event?: (input: { event: unknown }) => Promise<void>;
-  "command.execute.before"?: (
-    input: { command: string; sessionID: string; arguments: string },
-    output: { parts: Array<{ type: string; text?: string }> },
-  ) => Promise<void>;
-  "chat.message"?: (
-    input: { sessionID?: string },
-    output: {
-      message?: { id?: string; sessionID?: string; role?: string };
-      parts?: Array<{ type?: string; text?: string }>;
-    },
-  ) => Promise<void>;
-  "tool.execute.before"?: (
-    input: { tool: string; sessionID: string; callID: string },
-    output: { args: any },
-  ) => Promise<void>;
-  dispose?: () => Promise<void>;
 }
 
 const DEFAULT_TRANSCRIPT_CACHE_LIMIT = 40;
@@ -150,6 +120,18 @@ interface CircuitBreakerTurn {
   interrupted: boolean;
 }
 
+interface CircuitBreakerOptions {
+  maxConsecutive: number;
+  maxRecent: number;
+  window: number;
+}
+
+interface CircuitBreakerResult {
+  tripped: boolean;
+  consecutiveDenials: number;
+  recentDenials: number;
+}
+
 class CircuitBreaker {
   private turns = new Map<string, CircuitBreakerTurn>();
 
@@ -157,14 +139,7 @@ class CircuitBreaker {
     return this.turns.get(turnID)?.interrupted === true;
   }
 
-  recordDeny(
-    turnID: string,
-    opts: { maxConsecutive: number; maxRecent: number; window: number },
-  ): {
-    tripped: boolean;
-    consecutiveDenials: number;
-    recentDenials: number;
-  } {
+  recordDeny(turnID: string, opts: CircuitBreakerOptions): CircuitBreakerResult {
     let turn = this.turns.get(turnID);
     if (!turn) {
       turn = { consecutiveDenials: 0, recentDenials: [], interrupted: false };
@@ -482,12 +457,12 @@ export async function createGuardianHooks(
 
   return {
     event: async ({ event }) => {
-      const e = event as { type?: string; properties?: any };
+      const e = event as RawEvent;
       if (!e || typeof e.type !== "string") return;
 
       if (e.type === "permission.asked") {
         const req = e.properties as PermissionAskedRequest | undefined;
-        if (!req || typeof req.id !== "string" || typeof req.sessionID !== "string") return;
+        if (!req) return;
         await handlePermissionAsked(req);
         return;
       }
@@ -548,7 +523,9 @@ export async function createGuardianHooks(
         // `parts` from its closure scope, so a reassignment would not be
         // visible to it.
         output.parts.length = 0;
-        output.parts.push({ type: "text", text });
+        // Synthetic TextPart for the command response — id/sessionID/messageID
+        // are not meaningful for the LLM-facing command echo, so we cast.
+        output.parts.push({ type: "text", text } as Part);
         guardianLog(
           "[CMD] session=",
           input.sessionID,
@@ -569,8 +546,8 @@ export async function createGuardianHooks(
     "chat.message": async (_input, output) => {
       if (output.message?.role !== "user") return;
       const text = (output.parts ?? [])
-        .filter((p) => p.type === "text" && typeof p.text === "string")
-        .map((p) => (p.text ?? "").trim())
+        .filter((p): p is TextPart => p.type === "text" && typeof p.text === "string")
+        .map((p) => p.text.trim())
         .filter(Boolean)
         .join("\n");
       if (!text) return;

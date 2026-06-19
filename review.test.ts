@@ -1,5 +1,6 @@
 import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
 import { GuardianReviewError, type GuardianReviewerDeps, runGuardianReview } from "./review";
+import type { ContentPart } from "./types";
 
 const action: GuardianAction = {
   id: "perm-1",
@@ -12,9 +13,9 @@ const action: GuardianAction = {
 
 const transcript: GuardianTranscriptEntry[] = [{ role: "user", text: "clean up the build dir" }];
 
-function makeDeps(
-  handler: (parts: Array<{ type?: string; text?: string }>) => GuardianAssessment | Error,
-): GuardianReviewerDeps {
+type Handler = (parts: ContentPart[]) => GuardianAssessment | Error;
+
+function makeDeps(handler: Handler): GuardianReviewerDeps {
   return {
     createSession: async () => ({ id: "guardian-ses" }),
     prompt: async () => {

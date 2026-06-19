@@ -1,9 +1,5 @@
 import { describe, expect, test } from "vitest";
-import {
-  type GuardianAction,
-  type GuardianAssessment,
-  type GuardianTranscriptEntry,
-} from "./prompt";
+import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
 import { type GuardianReviewerDeps, runGuardianReview } from "./review";
 
 interface DemoCase {

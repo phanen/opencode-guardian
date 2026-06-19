@@ -1,5 +1,6 @@
 import { TENANT_POLICY } from "./policyConfig";
 import { POLICY_TEMPLATE } from "./policyTemplate";
+import type { ToolRef } from "./types";
 
 export type GuardianRiskLevel = "low" | "medium" | "high" | "critical";
 export type GuardianUserAuthorization = "unknown" | "low" | "medium" | "high";
@@ -19,7 +20,7 @@ export interface GuardianAction {
   metadata: Record<string, unknown>;
   always: string[];
   sessionID: string;
-  tool?: { messageID: string; callID: string };
+  tool?: ToolRef;
 }
 
 export interface GuardianTranscriptEntry {

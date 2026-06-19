@@ -1,60 +1,47 @@
 import path from "node:path";
+import type { PluginInput } from "@opencode-ai/plugin";
 import {
   createGuardianHooks,
   type GuardianOptions,
   type GuardianReply,
   type GuardianRuntimeDeps,
 } from "./guardianCore";
-import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
+import type { GuardianAction, GuardianTranscriptEntry } from "./prompt";
+import type { GuardianReviewOptions } from "./review";
 import { runGuardianReview } from "./review";
 import { type GuardianMode, readMode, writeMode } from "./state";
+import type {
+  LoggedError,
+  PermissionReplyBody,
+  RequestResult,
+  SessionCreateResponse,
+  SessionMessagesResponse,
+  SessionPromptResponse,
+  SdkClientWithPermissionReply,
+} from "./types";
+import { textFromParts } from "./utils";
 
-interface PluginCtx {
-  client: {
-    session: {
-      create: (opts: any) => Promise<{ data?: { id: string } }>;
-      prompt: (opts: any) => Promise<{ data?: { info: any; parts: any[] } }>;
-      messages: (opts: any) => Promise<{ data?: Array<{ info: any; parts: any[] }> }>;
-      abort?: (opts: any) => Promise<unknown>;
-    };
-    postSessionIdPermissionsPermissionId?: (opts: {
-      body: { response: "once" | "always" | "reject"; message?: string };
-      path: { id: string; permissionID: string };
-      query?: { directory?: string };
-    }) => Promise<unknown>;
-  };
-  directory: string;
-  worktree: string;
-  serverUrl?: string | URL;
-  project?: { workspaceID?: string };
-}
+type SdkClient = PluginInput["client"];
+type ExtendedSdkClient = SdkClient & SdkClientWithPermissionReply;
 
 export type GuardianPluginOptions = GuardianOptions & {
   mode?: GuardianMode;
 };
 
-function resolveStatePath(ctx: PluginCtx): string {
+function resolveStatePath(ctx: PluginInput): string {
   const root = ctx.directory || ctx.worktree;
   return path.join(root, ".guardian.json");
 }
 
-function textFromParts(parts: Array<{ type?: string; text?: string }> = []): string {
-  return parts
-    .filter((p) => p.type === "text" && typeof p.text === "string")
-    .map((p) => (p.text ?? "").trim())
-    .filter(Boolean)
-    .join("\n");
-}
-
 async function loadTranscript(
-  ctx: PluginCtx,
+  ctx: PluginInput,
   sessionID: string,
   limit: number,
 ): Promise<GuardianTranscriptEntry[]> {
   try {
-    const result = await ctx.client.session.messages({
+    const result = (await ctx.client.session.messages({
       path: { id: sessionID },
-    });
+    })) as SessionMessagesResponse;
     const messages = result?.data ?? [];
     const out: GuardianTranscriptEntry[] = [];
     for (const m of messages) {
@@ -77,8 +64,13 @@ async function loadTranscript(
   }
 }
 
+function extractStatus(target: unknown): number | string {
+  const t = target as RequestResult;
+  return t?.status ?? t?.response?.status ?? "(unknown)";
+}
+
 async function replyPermission(
-  ctx: PluginCtx,
+  ctx: PluginInput,
   sessionID: string,
   requestID: string,
   reply: GuardianReply,
@@ -106,38 +98,35 @@ async function replyPermission(
   // Must invoke through ctx.client.<method>(...) — NOT a hoisted reference
   // like `const m = ctx.client.post...; m(...)` — because the SDK method
   // reads `this._client` internally and the binding is lost on extraction.
-  if (!ctx.client.postSessionIdPermissionsPermissionId) {
+  const sdkClient = ctx.client as ExtendedSdkClient;
+  const sdkMethod = sdkClient.postSessionIdPermissionsPermissionId;
+  if (!sdkMethod) {
     log(`request_id=${requestID} outcome=missing_sdk_method`);
     throw new Error("opencode SDK does not expose postSessionIdPermissionsPermissionId");
   }
 
-  const body: { response: GuardianReply; message?: string } = { response: reply };
+  const body: PermissionReplyBody = { response: reply };
   if (message) body.message = message;
 
   const t0 = Date.now();
   try {
-    const result = await ctx.client.postSessionIdPermissionsPermissionId({
+    const result = await sdkMethod({
       body,
       path: { id: sessionID, permissionID: requestID },
       query: ctx.directory ? { directory: ctx.directory } : undefined,
     });
     const elapsed = Date.now() - t0;
-    const status =
-      (result as { response?: Response; status?: number })?.status ??
-      (result as { response?: Response })?.response?.status ??
-      "(unknown)";
+    const status = extractStatus(result);
     log(`request_id=${requestID} response status=${status} elapsed_ms=${elapsed}`);
     log(`request_id=${requestID} outcome=success status=${status}`);
   } catch (err) {
-    const status =
-      (err as { response?: Response; status?: number })?.status ??
-      (err as { response?: Response })?.response?.status ??
-      "(none)";
-    const body =
-      (await (err as { response?: Response })?.response?.text?.().catch(() => "(unreadable)")) ??
-      "";
+    const loggedErr = err as LoggedError;
+    const status = extractStatus(loggedErr);
+    const responseBody = loggedErr.response
+      ? await loggedErr.response.text().catch(() => "(unreadable)")
+      : "";
     log(
-      `request_id=${requestID} sdk_error status=${status} body=${body.slice(0, 500)} message=${(err as Error).message}`,
+      `request_id=${requestID} sdk_error status=${status} body=${responseBody.slice(0, 500)} message=${loggedErr.message}`,
     );
     if (status === 404) {
       log(`request_id=${requestID} outcome=404_benign (request already gone from pending)`);
@@ -148,17 +137,19 @@ async function replyPermission(
 }
 
 export default async function GuardianPlugin(
-  ctx: PluginCtx,
+  ctx: PluginInput,
   options: GuardianPluginOptions = {},
 ): Promise<ReturnType<typeof createGuardianHooks>> {
   const statePath = resolveStatePath(ctx);
 
-  const reviewOptions: import("./review").GuardianReviewOptions = {
+  const reviewOptions: GuardianReviewOptions = {
     guardianModel: options.guardianModel,
     timeoutMs: options.timeoutMs ?? 90_000,
     maxAttempts: options.maxAttempts ?? 3,
     baseBackoffMs: options.baseBackoffMs ?? 500,
   };
+
+  const sdkClient = ctx.client as ExtendedSdkClient;
 
   const deps: GuardianRuntimeDeps = {
     readMode: () => readMode(options.mode ?? "user", statePath),
@@ -167,13 +158,13 @@ export default async function GuardianPlugin(
     runReview: async (action: GuardianAction, transcript: GuardianTranscriptEntry[]) => {
       const assessment = await runGuardianReview(action, transcript, reviewOptions, {
         createSession: async () => {
-          const res = await ctx.client.session.create({});
+          const res = (await sdkClient.session.create({})) as SessionCreateResponse;
           const id = res?.data?.id;
           if (!id) throw new Error("createSession returned no id");
           return { id };
         },
         prompt: async (sessionID, body) => {
-          const res = await ctx.client.session.prompt({
+          const res = (await sdkClient.session.prompt({
             path: { id: sessionID },
             body: {
               system: body.system,
@@ -181,7 +172,7 @@ export default async function GuardianPlugin(
               model: body.model,
               noReply: body.noReply,
             },
-          });
+          })) as SessionPromptResponse;
           const data = res?.data;
           return {
             info: data?.info ?? { id: "", sessionID, role: "assistant" },
@@ -190,7 +181,7 @@ export default async function GuardianPlugin(
         },
         abortSession: async (sessionID) => {
           try {
-            await ctx.client.session.abort?.({ path: { id: sessionID } });
+            await sdkClient.session.abort?.({ path: { id: sessionID } });
           } catch {
             // ignore
           }
@@ -198,7 +189,7 @@ export default async function GuardianPlugin(
       });
       return assessment;
     },
-    replyPermission: (sessionID, requestID, reply, message) =>
+    replyPermission: async (sessionID, requestID, reply, message) =>
       replyPermission(ctx, sessionID, requestID, reply, message),
   };
 

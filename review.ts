@@ -6,30 +6,40 @@ import {
   type GuardianTranscriptEntry,
   parseGuardianAssessment,
 } from "./prompt";
+import type { ContentPart, MessageInfo, ModelRef, SessionId } from "./types";
+import { textFromParts } from "./utils";
+
+interface PromptTextPart {
+  type: "text";
+  text: string;
+}
+
+type AssistantPart = ContentPart;
+type AssistantInfo = MessageInfo;
 
 export interface GuardianReviewOptions {
-  guardianModel?: { providerID: string; modelID: string };
+  guardianModel?: ModelRef;
   timeoutMs: number;
   maxAttempts: number;
   baseBackoffMs: number;
 }
 
 export interface GuardianReviewerDeps {
-  createSession: () => Promise<{ id: string }>;
+  createSession: () => Promise<SessionId>;
   prompt: (sessionID: string, body: PromptBody) => Promise<AssistantMessageWithParts>;
   abortSession?: (sessionID: string) => Promise<void>;
 }
 
 export interface PromptBody {
   system?: string;
-  parts: Array<{ type: "text"; text: string }>;
-  model?: { providerID: string; modelID: string };
+  parts: PromptTextPart[];
+  model?: ModelRef;
   noReply?: boolean;
 }
 
 export interface AssistantMessageWithParts {
-  info: { id: string; sessionID: string; role: string };
-  parts: Array<{ type?: string; text?: string }>;
+  info: AssistantInfo;
+  parts: AssistantPart[];
 }
 
 export type GuardianDecision = GuardianAssessment;
@@ -55,14 +65,6 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 function backoff(attempt: number, base: number): number {
   return base * 2 ** Math.max(0, attempt - 1);
-}
-
-function textFromParts(parts: Array<{ type?: string; text?: string }> = []): string {
-  return parts
-    .filter((p) => p.type === "text" && typeof p.text === "string")
-    .map((p) => (p.text ?? "").trim())
-    .filter(Boolean)
-    .join("\n");
 }
 
 function isRetryableErrorKind(kind: GuardianReviewErrorKind): boolean {

@@ -1,4 +1,9 @@
-import { __test_internals, createGuardianHooks, type GuardianReply } from "./guardianCore";
+import {
+  __test_internals,
+  createGuardianHooks,
+  type CommandExecuteBeforeOutput,
+  type GuardianReply,
+} from "./guardianCore";
 import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
 import { GuardianReviewError } from "./review";
 import type { GuardianMode } from "./state";
@@ -325,7 +330,7 @@ describe("guardianCore — event-driven permission review", () => {
   test("/guardian command updates mode and returns status text", async () => {
     const t = makeDeps({ mode: "user" });
     const hooks = await createGuardianHooks({}, t.deps);
-    const out = { parts: [] as Array<{ type: string; text?: string }> };
+    const out: CommandExecuteBeforeOutput = { parts: [] };
     await hooks["command.execute.before"]!(
       { command: "guardian", sessionID: "ses-cmd-3", arguments: "on" },
       out,
