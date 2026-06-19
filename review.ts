@@ -28,7 +28,7 @@ export interface GuardianReviewOptions {
 }
 
 export interface GuardianReviewerDeps {
-  createSession: () => Promise<SessionId>;
+  createSession: (parentID: string) => Promise<SessionId>;
   prompt: (sessionID: string, body: PromptBody) => Promise<AssistantMessageWithParts>;
   abortSession?: (sessionID: string) => Promise<void>;
 }
@@ -106,7 +106,7 @@ export async function runGuardianReview(
     try {
       if (!sessionID) {
         try {
-          const created = await deps.createSession();
+          const created = await deps.createSession(action.sessionID);
           sessionID = created.id;
         } catch (err) {
           throw new GuardianReviewError(
@@ -208,7 +208,7 @@ export async function runGuardianQuestionReview(
     try {
       if (!sessionID) {
         try {
-          const created = await deps.createSession();
+          const created = await deps.createSession(request.sessionID);
           sessionID = created.id;
         } catch (err) {
           throw new GuardianReviewError(

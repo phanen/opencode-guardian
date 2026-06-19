@@ -236,8 +236,10 @@ export default async function GuardianPlugin(
     loadTranscript: (sessionID, limit) => loadTranscript(ctx, sessionID, limit),
     runReview: async (action: GuardianAction, transcript: GuardianTranscriptEntry[]) => {
       const assessment = await runGuardianReview(action, transcript, reviewOptions, {
-        createSession: async () => {
-          const res = (await sdkClient.session.create({})) as SessionCreateResponse;
+        createSession: async (parentID: string) => {
+          const res = (await sdkClient.session.create({
+            body: { parentID, title: "guardian-review" },
+          })) as SessionCreateResponse;
           const id = res?.data?.id;
           if (!id) throw new Error("createSession returned no id");
           return { id };
@@ -274,8 +276,10 @@ export default async function GuardianPlugin(
     rejectQuestion: async (sessionID, requestID) => rejectQuestion(ctx, sessionID, requestID),
     runQuestionReview: async (request: QuestionAskedRequest, transcript: GuardianTranscriptEntry[]) => {
       return runGuardianQuestionReview(request, transcript, reviewOptions, {
-        createSession: async () => {
-          const res = (await sdkClient.session.create({})) as SessionCreateResponse;
+        createSession: async (parentID: string) => {
+          const res = (await sdkClient.session.create({
+            body: { parentID, title: "guardian-review" },
+          })) as SessionCreateResponse;
           const id = res?.data?.id;
           if (!id) throw new Error("createSession returned no id");
           return { id };

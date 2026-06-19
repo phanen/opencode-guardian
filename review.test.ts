@@ -17,7 +17,7 @@ type Handler = (parts: ContentPart[]) => GuardianAssessment | Error;
 
 function makeDeps(handler: Handler): GuardianReviewerDeps {
   return {
-    createSession: async () => ({ id: "guardian-ses" }),
+    createSession: async (_parentID: string) => ({ id: "guardian-ses" }),
     prompt: async () => {
       const r = handler([]);
       if (r instanceof Error) throw r;
@@ -51,7 +51,7 @@ describe("review", () => {
   test("retries on parse failure then succeeds", async () => {
     let calls = 0;
     const deps: GuardianReviewerDeps = {
-      createSession: async () => ({ id: "guardian-ses" }),
+      createSession: async (_parentID: string) => ({ id: "guardian-ses" }),
       prompt: async () => {
         calls += 1;
         if (calls === 1) {
@@ -73,7 +73,7 @@ describe("review", () => {
 
   test("throws GuardianReviewError on persistent parse failure", async () => {
     const deps: GuardianReviewerDeps = {
-      createSession: async () => ({ id: "guardian-ses" }),
+      createSession: async (_parentID: string) => ({ id: "guardian-ses" }),
       prompt: async () => ({
         info: { id: "msg-1", sessionID: "guardian-ses", role: "assistant" },
         parts: [{ type: "text", text: "garbage" }],
@@ -86,7 +86,7 @@ describe("review", () => {
 
   test("throws timeout when deadline is reached", async () => {
     const deps: GuardianReviewerDeps = {
-      createSession: async () => ({ id: "guardian-ses" }),
+      createSession: async (_parentID: string) => ({ id: "guardian-ses" }),
       prompt: async () => {
         await new Promise((r) => setTimeout(r, 100));
         return {
@@ -104,7 +104,7 @@ describe("review", () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 5);
     const deps: GuardianReviewerDeps = {
-      createSession: async () => ({ id: "guardian-ses" }),
+      createSession: async (_parentID: string) => ({ id: "guardian-ses" }),
       prompt: async () => {
         await new Promise((r) => setTimeout(r, 100));
         return {
@@ -122,7 +122,7 @@ describe("review", () => {
     let createCount = 0;
     let promptCount = 0;
     const deps: GuardianReviewerDeps = {
-      createSession: async () => {
+      createSession: async (_parentID: string) => {
         createCount += 1;
         return { id: "guardian-ses" };
       },
@@ -139,5 +139,22 @@ describe("review", () => {
     expect(r.outcome).toBe("allow");
     expect(createCount).toBe(1);
     expect(promptCount).toBe(2);
+  });
+
+  test("createSession receives action.sessionID as parentID", async () => {
+    const received: string[] = [];
+    const deps: GuardianReviewerDeps = {
+      createSession: async (parentID: string) => {
+        received.push(parentID);
+        return { id: "guardian-ses" };
+      },
+      prompt: async () => ({
+        info: { id: "msg-1", sessionID: "guardian-ses", role: "assistant" },
+        parts: [{ type: "text", text: JSON.stringify(allowAssessment) }],
+      }),
+    };
+    const a: GuardianAction = { ...action, sessionID: "ses-parent-42" };
+    await runGuardianReview(a, transcript, { timeoutMs: 1000, maxAttempts: 1, baseBackoffMs: 1 }, deps);
+    expect(received).toEqual(["ses-parent-42"]);
   });
 });
