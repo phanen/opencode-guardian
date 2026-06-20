@@ -207,3 +207,72 @@ describe("prompt — question helpers", () => {
     }
   });
 });
+
+describe("parseQuestionDecision — (Recommended) suffix and fuzzy match", () => {
+  const withRecommended: QuestionAskedRequest = {
+    id: "q-1",
+    sessionID: "ses-1",
+    questions: [
+      {
+        question: "Pick one",
+        header: "h",
+        options: [
+          { label: "派之前先确认 spec (Recommended)", description: "..." },
+          { label: "你写啥我派啥", description: "..." },
+        ],
+      },
+    ],
+  };
+
+  test("accepts answer that omits the (Recommended) suffix", () => {
+    const r = parseQuestionDecision(
+      JSON.stringify({ action: "answer", answers: [["派之前先确认 spec"]] }),
+      withRecommended,
+    );
+    expect(r.action).toBe("answer");
+    if (r.action === "answer") {
+      // Returns the canonical option label, not the LLM's mangled input.
+      expect(r.answers).toEqual([["派之前先确认 spec (Recommended)"]]);
+    }
+  });
+
+  test("accepts the canonical label with (Recommended) unchanged", () => {
+    const r = parseQuestionDecision(
+      JSON.stringify({ action: "answer", answers: [["派之前先确认 spec (Recommended)"]] }),
+      withRecommended,
+    );
+    expect(r.action).toBe("answer");
+    if (r.action === "answer") {
+      expect(r.answers).toEqual([["派之前先确认 spec (Recommended)"]]);
+    }
+  });
+
+  test("tolerates trailing whitespace before (Recommended)", () => {
+    const r = parseQuestionDecision(
+      JSON.stringify({ action: "answer", answers: [["派之前先确认 spec  (Recommended)"]] }),
+      withRecommended,
+    );
+    expect(r.action).toBe("answer");
+  });
+
+  test("fuzzy-matches a label with shared prefix above threshold", () => {
+    const r = parseQuestionDecision(JSON.stringify({ action: "answer", answers: [["派之前先确认"]] }), withRecommended);
+    expect(r.action).toBe("answer");
+    if (r.action === "answer") {
+      expect(r.answers).toEqual([["派之前先确认 spec (Recommended)"]]);
+    }
+  });
+
+  test("rejects a clearly different option (no shared prefix)", () => {
+    expect(() =>
+      parseQuestionDecision(JSON.stringify({ action: "answer", answers: [["完全不相关"]] }), withRecommended),
+    ).toThrow(/unknown label/);
+  });
+
+  test("rejects label below fuzzy-match threshold", () => {
+    // 1 char of overlap out of 8 = 0.125, well below 0.3.
+    expect(() =>
+      parseQuestionDecision(JSON.stringify({ action: "answer", answers: [["派不相干"]] }), withRecommended),
+    ).toThrow(/unknown label/);
+  });
+});

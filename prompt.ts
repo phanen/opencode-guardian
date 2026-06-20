@@ -303,6 +303,17 @@ export function buildQuestionUserContent(request: QuestionAskedRequest, transcri
 }
 
 const QUESTION_ACTIONS = ["answer", "reject"] as const;
+const RECOMMENDED_SUFFIX_RE = /\s*\(Recommended\)\s*$/;
+const FUZZY_MATCH_THRESHOLD = 0.3;
+
+interface QuestionOptionLike {
+  label: string;
+}
+
+interface FuzzyMatch {
+  option: QuestionOptionLike;
+  ratio: number;
+}
 
 function isQuestionAction(v: unknown): v is "answer" | "reject" {
   return typeof v === "string" && (QUESTION_ACTIONS as readonly string[]).includes(v);
@@ -310,6 +321,42 @@ function isQuestionAction(v: unknown): v is "answer" | "reject" {
 
 function isLabelValid(label: unknown): label is string {
   return typeof label === "string" && label.length > 0;
+}
+
+// Strip the trailing " (Recommended)" UI hint so a label with or without
+// the hint matches the same option. The hint is decorative, not
+// semantic — codex's question tool adds it client-side as a UX
+// affordance, and downstream tools that consume the chosen labels
+// should not see two different labels for the same option.
+function normalizeQuestionLabel(label: string): string {
+  return label.replace(RECOMMENDED_SUFFIX_RE, "");
+}
+
+// Length of the longest common prefix, in code units.
+function commonPrefixLength(a: string, b: string): number {
+  const limit = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < limit && a.charCodeAt(i) === b.charCodeAt(i)) i += 1;
+  return i;
+}
+
+// Best-effort fuzzy match for cases where the LLM drops a UI suffix,
+// trims whitespace, or otherwise mangles a label that is otherwise
+// recognizable. Threshold is conservative on purpose — if the LLM
+// returns a clearly different option, we still reject.
+function findClosestOption(candidate: string, options: ReadonlyArray<QuestionOptionLike>): FuzzyMatch | undefined {
+  const normalizedCandidate = normalizeQuestionLabel(candidate);
+  let best: FuzzyMatch | undefined;
+  for (const option of options) {
+    const normalizedOption = normalizeQuestionLabel(option.label);
+    const prefixLen = commonPrefixLength(normalizedCandidate, normalizedOption);
+    const ratio = prefixLen / Math.max(normalizedCandidate.length, normalizedOption.length, 1);
+    if (!best || ratio > best.ratio) {
+      best = { option, ratio };
+    }
+  }
+  if (!best || best.ratio < FUZZY_MATCH_THRESHOLD) return undefined;
+  return best;
 }
 
 export function parseQuestionDecision(
@@ -345,22 +392,41 @@ export function parseQuestionDecision(
       `guardian question response answers.length=${rawAnswers.length} does not match questions.length=${request.questions.length}`,
     );
   }
-  const validLabels = request.questions.map((q) => new Set(q.options.map((o) => o.label)));
   const answers: string[][] = [];
   for (let i = 0; i < rawAnswers.length; i++) {
     const arr = rawAnswers[i];
     if (!Array.isArray(arr) || arr.length === 0) {
       throw new Error(`guardian question response answers[${i}] must be a non-empty array of label strings`);
     }
+    const options = request.questions[i]?.options ?? [];
+    const normalizedValidLabels = new Map<string, string>();
+    for (const opt of options) {
+      normalizedValidLabels.set(normalizeQuestionLabel(opt.label), opt.label);
+    }
     const labels: string[] = [];
     for (const v of arr) {
       if (!isLabelValid(v)) {
         throw new Error(`guardian question response answers[${i}] contains non-string label: ${String(v)}`);
       }
-      if (!validLabels[i]?.has(v)) {
-        throw new Error(`guardian question response answers[${i}] contains unknown label: ${v}`);
+      // First try exact match on the normalized label so that a
+      // trimmed " (Recommended)" suffix still resolves to the
+      // canonical option label.
+      const normalized = normalizeQuestionLabel(v);
+      const exact = normalizedValidLabels.get(normalized);
+      if (exact) {
+        labels.push(exact);
+        continue;
       }
-      labels.push(v);
+      // Fall back to fuzzy match against the normalized option
+      // labels. This is intentionally conservative: an obviously
+      // different label (no shared prefix above the threshold) still
+      // errors out, so the caller can fall back to the user.
+      const fuzzy = findClosestOption(v, options);
+      if (fuzzy) {
+        labels.push(fuzzy.option.label);
+        continue;
+      }
+      throw new Error(`guardian question response answers[${i}] contains unknown label: ${v}`);
     }
     answers.push(labels);
   }
