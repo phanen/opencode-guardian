@@ -6,7 +6,7 @@ import {
   type GuardianReply,
   type GuardianRuntimeDeps,
 } from "./guardianCore";
-import type { GuardianAction, GuardianTranscriptEntry } from "./prompt";
+import type { GuardianTranscriptEntry } from "./prompt";
 import type { GuardianReviewOptions, PromptBody } from "./review";
 import { runGuardianQuestionReview, runGuardianReview } from "./review";
 import { type GuardianMode, readMode, writeMode } from "./state";
@@ -14,7 +14,6 @@ import { GuardianTrunkManager, createTrunkFactoryFromSdk } from "./guardianTrunk
 import type {
   LoggedError,
   PermissionReplyBody,
-  QuestionAskedRequest,
   RequestResult,
   SessionAdminClient,
   SessionMessagesResponse,
@@ -234,6 +233,7 @@ export default async function GuardianPlugin(
   const trunkManager = new GuardianTrunkManager({
     factory: createTrunkFactoryFromSdk(sdkClient, "guardian-review", (msg) => $log!("TRUNK", msg)),
     title: "guardian-review",
+    maxReviewsPerTrunk: options.maxReviewsPerTrunk ?? 10,
   });
 
   const reviewDeps = {
@@ -266,18 +266,16 @@ export default async function GuardianPlugin(
     readMode: () => readMode(options.mode ?? "user", statePath),
     writeMode: (mode) => writeMode(mode, statePath),
     loadTranscript: (sessionID, limit) => loadTranscript(ctx, sessionID, limit),
-    runReview: async (action: GuardianAction, transcript: GuardianTranscriptEntry[]) => {
-      const sessionID = await trunkManager.getOrCreate(action.sessionID);
-      return runGuardianReview(action, transcript, reviewOptions, reviewDeps, undefined, { sessionID });
-    },
+    runReview: (action, transcript, signal, runOptions) =>
+      runGuardianReview(action, transcript, reviewOptions, reviewDeps, signal, runOptions),
     replyPermission: async (sessionID, requestID, reply, message) =>
       replyPermission(ctx, sessionID, requestID, reply, message),
     replyQuestion: async (sessionID, requestID, answers) => replyQuestion(ctx, sessionID, requestID, answers),
     rejectQuestion: async (sessionID, requestID) => rejectQuestion(ctx, sessionID, requestID),
-    runQuestionReview: async (request: QuestionAskedRequest, transcript: GuardianTranscriptEntry[]) => {
-      const sessionID = await trunkManager.getOrCreate(request.sessionID);
-      return runGuardianQuestionReview(request, transcript, reviewOptions, reviewDeps, undefined, { sessionID });
-    },
+    runQuestionReview: (request, transcript, signal, runOptions) =>
+      runGuardianQuestionReview(request, transcript, reviewOptions, reviewDeps, signal, runOptions),
+    acquireTrunk: (parentID, transcriptLength) => trunkManager.getOrCreate(parentID, transcriptLength),
+    recordTrunkReviewed: (parentID, transcriptLength) => trunkManager.recordReviewed(parentID, transcriptLength),
     invalidateReviewTrunks: () => trunkManager.invalidateAll(),
   };
 

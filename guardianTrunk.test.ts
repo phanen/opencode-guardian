@@ -1,310 +1,363 @@
 import { GuardianTrunkManager, createTrunkFactoryFromSdk } from "./guardianTrunk";
-import type { GuardianTrunkFactory, SessionAdminClient, SessionCreateArgs, SessionDeleteArgs } from "./types";
+import type { GuardianSessionInfo, SessionAdminClient } from "./types";
 
 interface FactoryCall {
-  kind: "create" | "delete";
+  kind: "create" | "delete" | "children" | "get";
   parentID?: string;
   sessionID?: string;
 }
 
-interface StatusError extends Error {
+interface FakeErrorOptions {
   status?: number;
+  message?: string;
 }
 
-interface RecordingFactoryFails {
-  create?: string;
-  delete?: string;
+interface FakeTrunkOpts {
+  existingTrunks?: GuardianSessionInfo[];
+  childrenError?: FakeErrorOptions;
+  getError?: FakeErrorOptions;
+  createId?: string;
 }
 
-interface RecordingFactoryOpts {
-  idsByParent?: Record<string, string>;
-  fails?: RecordingFactoryFails;
-}
-
-interface RecordingFactoryHandle {
-  factory: GuardianTrunkFactory;
+interface FakeSdkHandle {
+  sdk: SessionAdminClient;
   calls: FactoryCall[];
-  createCount: () => number;
-  deleteCount: () => number;
 }
 
-function makeRecordingFactory(opts: RecordingFactoryOpts = {}): RecordingFactoryHandle {
+const MAX_REVIEWS = 3;
+
+function makeFakeSdk(opts: FakeTrunkOpts = {}): FakeSdkHandle {
   const calls: FactoryCall[] = [];
-  let nextId = 0;
-  const factory: GuardianTrunkFactory = {
-    createReviewSession: async (parentID) => {
-      calls.push({ kind: "create", parentID });
-      if (opts.fails?.create) throw new Error(opts.fails.create);
-      const fixed = opts.idsByParent?.[parentID];
-      const id = fixed ?? `ses_guardian_${++nextId}`;
-      return id;
-    },
-    deleteReviewSession: async (sessionID) => {
-      calls.push({ kind: "delete", sessionID });
-      if (opts.fails?.delete) throw new Error(opts.fails.delete);
+  let nextCreateId = 1;
+  const sdk: SessionAdminClient = {
+    session: {
+      create: async (args) => {
+        calls.push({ kind: "create", parentID: args.body?.parentID });
+        return { data: { id: opts.createId ?? `ses_grd_${nextCreateId++}` } };
+      },
+      delete: async (args) => {
+        calls.push({ kind: "delete", sessionID: args.path.id });
+      },
+      children: async (args) => {
+        calls.push({ kind: "children", parentID: args.path.id });
+        if (opts.childrenError) {
+          const err = new Error(opts.childrenError.message ?? "children failed") as Error & { status?: number };
+          err.status = opts.childrenError.status;
+          throw err;
+        }
+        const trunks = (opts.existingTrunks ?? []).filter((t) => t.parentID === args.path.id);
+        return { data: trunks };
+      },
+      get: async (args) => {
+        calls.push({ kind: "get", sessionID: args.path.id });
+        if (opts.getError) {
+          const err = new Error(opts.getError.message ?? "get failed") as Error & { status?: number };
+          err.status = opts.getError.status;
+          throw err;
+        }
+        return { data: { id: args.path.id, title: "guardian-review" } };
+      },
     },
   };
+  return { sdk, calls };
+}
+
+interface MakeTrunkOpts {
+  parentID?: string;
+  title?: string;
+  created?: number;
+  updated?: number;
+}
+
+function makeTrunk(id: string, opts: MakeTrunkOpts = {}): GuardianSessionInfo {
+  const t = opts.created ?? 1_000;
   return {
-    factory,
-    calls,
-    createCount: () => calls.filter((c) => c.kind === "create").length,
-    deleteCount: () => calls.filter((c) => c.kind === "delete").length,
+    id,
+    parentID: opts.parentID ?? "ses_parent_1",
+    title: opts.title ?? "guardian-review",
+    time: { created: t, updated: opts.updated ?? t },
   };
 }
 
-describe("GuardianTrunkManager", () => {
-  test("getOrCreate creates exactly one session per parent", async () => {
-    const { factory, createCount } = makeRecordingFactory();
-    const mgr = new GuardianTrunkManager({ factory, title: "guardian-review" });
-
-    const a = await mgr.getOrCreate("ses_parent_1");
-    const b = await mgr.getOrCreate("ses_parent_1");
-    const c = await mgr.getOrCreate("ses_parent_1");
-
-    expect(a).toBe(b);
-    expect(b).toBe(c);
-    expect(createCount()).toBe(1);
-  });
-
-  test("different parents get different trunks", async () => {
-    const { factory, createCount } = makeRecordingFactory({
-      idsByParent: { ses_parent_1: "ses_grd_1", ses_parent_2: "ses_grd_2" },
-    });
-    const mgr = new GuardianTrunkManager({ factory, title: "guardian-review" });
-
-    const id1 = await mgr.getOrCreate("ses_parent_1");
-    const id2 = await mgr.getOrCreate("ses_parent_2");
-    const id1Again = await mgr.getOrCreate("ses_parent_1");
-
-    expect(id1).toBe("ses_grd_1");
-    expect(id2).toBe("ses_grd_2");
-    expect(id1Again).toBe("ses_grd_1");
-    expect(createCount()).toBe(2);
-  });
-
-  test("concurrent getOrCreate shares a single create call", async () => {
-    let creates = 0;
-    const factory: GuardianTrunkFactory = {
-      createReviewSession: async () => {
-        creates += 1;
-        await new Promise((r) => setTimeout(r, 5));
-        return "ses_grd_42";
-      },
-      deleteReviewSession: async () => {},
-    };
-    const mgr = new GuardianTrunkManager({ factory, title: "guardian-review" });
-
-    const results = await Promise.all([
-      mgr.getOrCreate("ses_parent_1"),
-      mgr.getOrCreate("ses_parent_1"),
-      mgr.getOrCreate("ses_parent_1"),
-    ]);
-    expect(creates).toBe(1);
-    expect(results.every((id) => id === "ses_grd_42")).toBe(true);
-  });
-
-  test("create failure does not poison the cache", async () => {
-    let shouldFail = true;
-    const factory: GuardianTrunkFactory = {
-      createReviewSession: async () => {
-        if (shouldFail) {
-          shouldFail = false;
-          throw new Error("transient create error");
-        }
-        return "ses_grd_recovered";
-      },
-      deleteReviewSession: async () => {},
-    };
-    const mgr = new GuardianTrunkManager({ factory, title: "guardian-review" });
-
-    await expect(mgr.getOrCreate("ses_parent_1")).rejects.toThrow("transient create error");
-    const recovered = await mgr.getOrCreate("ses_parent_1");
-    expect(recovered).toBe("ses_grd_recovered");
-  });
-
-  test("invalidate deletes the session and removes it from cache", async () => {
-    const { factory, createCount, deleteCount } = makeRecordingFactory();
-    const mgr = new GuardianTrunkManager({ factory, title: "guardian-review" });
-
-    const id = await mgr.getOrCreate("ses_parent_1");
-    expect(createCount()).toBe(1);
-    await mgr.invalidate("ses_parent_1");
-    expect(deleteCount()).toBe(1);
-
-    // Next call should create a new session.
-    const id2 = await mgr.getOrCreate("ses_parent_1");
-    expect(createCount()).toBe(2);
-    expect(id2).not.toBe(id);
-  });
-
-  test("invalidate is idempotent (no entry, no-op)", async () => {
-    const { factory, deleteCount } = makeRecordingFactory();
-    const mgr = new GuardianTrunkManager({ factory, title: "guardian-review" });
-    await mgr.invalidate("never_created");
-    expect(deleteCount()).toBe(0);
-  });
-
-  test("delete failure during invalidate is logged, not thrown", async () => {
-    const warns: string[] = [];
-    const { factory, deleteCount } = makeRecordingFactory({ fails: { delete: "boom" } });
+describe("GuardianTrunkManager — getOrCreate with children-based discovery", () => {
+  test("creates a new trunk when no children exist", async () => {
+    const { sdk, calls } = makeFakeSdk({ existingTrunks: [] });
     const mgr = new GuardianTrunkManager({
-      factory,
+      factory: createTrunkFactoryFromSdk(sdk, "guardian-review"),
       title: "guardian-review",
+      maxReviewsPerTrunk: MAX_REVIEWS,
+    });
+    const r = await mgr.getOrCreate("ses_parent_1", 10);
+    expect(r).toEqual({ sessionID: "ses_grd_1", deltaStart: 0 });
+    const kinds = calls.map((c) => c.kind);
+    expect(kinds).toContain("children");
+    expect(kinds).toContain("create");
+  });
+
+  test("reattaches to the most recent existing child on first call", async () => {
+    const trunks = [makeTrunk("ses_grd_old", { created: 1_000 }), makeTrunk("ses_grd_new", { created: 2_000 })];
+    const { sdk, calls } = makeFakeSdk({ existingTrunks: trunks });
+    const mgr = new GuardianTrunkManager({
+      factory: createTrunkFactoryFromSdk(sdk, "guardian-review"),
+      title: "guardian-review",
+      maxReviewsPerTrunk: MAX_REVIEWS,
+    });
+    const r = await mgr.getOrCreate("ses_parent_1", 10);
+    expect(r.sessionID).toBe("ses_grd_new");
+    expect(r.deltaStart).toBe(0);
+    expect(calls.filter((c) => c.kind === "create")).toHaveLength(0);
+    expect(calls.filter((c) => c.kind === "get")).toHaveLength(1);
+  });
+
+  test("ignores children with mismatched title", async () => {
+    const trunks = [makeTrunk("ses_grd_other", { title: "other" })];
+    const { sdk, calls } = makeFakeSdk({ existingTrunks: trunks });
+    const mgr = new GuardianTrunkManager({
+      factory: createTrunkFactoryFromSdk(sdk, "guardian-review"),
+      title: "guardian-review",
+      maxReviewsPerTrunk: MAX_REVIEWS,
+    });
+    const r = await mgr.getOrCreate("ses_parent_1", 10);
+    expect(r.sessionID).toBe("ses_grd_1");
+    expect(calls.filter((c) => c.kind === "create")).toHaveLength(1);
+  });
+
+  test("falls back to create when get on the chosen child returns 404", async () => {
+    const trunks = [makeTrunk("ses_grd_stale", { created: 1_000 })];
+    const { sdk, calls } = makeFakeSdk({ existingTrunks: trunks, getError: { status: 404 } });
+    const mgr = new GuardianTrunkManager({
+      factory: createTrunkFactoryFromSdk(sdk, "guardian-review"),
+      title: "guardian-review",
+      maxReviewsPerTrunk: MAX_REVIEWS,
+    });
+    const r = await mgr.getOrCreate("ses_parent_1", 10);
+    expect(r.sessionID).toBe("ses_grd_1");
+    expect(calls.filter((c) => c.kind === "create")).toHaveLength(1);
+  });
+
+  test("propagates non-404 children errors but still creates a new trunk", async () => {
+    const { sdk, calls } = makeFakeSdk({ childrenError: { status: 500, message: "boom" } });
+    const warns: string[] = [];
+    const mgr = new GuardianTrunkManager({
+      factory: createTrunkFactoryFromSdk(sdk, "guardian-review", (m) => warns.push(m)),
+      title: "guardian-review",
+      maxReviewsPerTrunk: MAX_REVIEWS,
       onWarn: (m) => warns.push(m),
     });
-
-    await mgr.getOrCreate("ses_parent_1");
-    await expect(mgr.invalidate("ses_parent_1")).resolves.toBeUndefined();
-    expect(deleteCount()).toBe(1);
-    expect(warns).toHaveLength(1);
-    expect(warns[0]).toMatch(/ses_guardian_1/);
-  });
-
-  test("invalidateAll tears down every cached parent", async () => {
-    const { factory, createCount, deleteCount } = makeRecordingFactory();
-    const mgr = new GuardianTrunkManager({ factory, title: "guardian-review" });
-
-    await mgr.getOrCreate("ses_parent_1");
-    await mgr.getOrCreate("ses_parent_2");
-    await mgr.getOrCreate("ses_parent_3");
-    expect(createCount()).toBe(3);
-
-    await mgr.invalidateAll();
-    expect(deleteCount()).toBe(3);
-
-    // After invalidateAll, every parent needs a fresh create.
-    await mgr.getOrCreate("ses_parent_1");
-    expect(createCount()).toBe(4);
+    const r = await mgr.getOrCreate("ses_parent_1", 10);
+    expect(r.sessionID).toBe("ses_grd_1");
+    expect(calls.filter((c) => c.kind === "create")).toHaveLength(1);
+    expect(warns.some((w) => w.includes("boom"))).toBe(true);
   });
 });
 
-interface FakePostOptions {
-  url: string;
-}
+describe("GuardianTrunkManager — recordReviewed delta tracking", () => {
+  test("second getOrCreate returns the previously recorded delta start", async () => {
+    const { sdk } = makeFakeSdk({ existingTrunks: [] });
+    const mgr = new GuardianTrunkManager({
+      factory: createTrunkFactoryFromSdk(sdk, "guardian-review"),
+      title: "guardian-review",
+      maxReviewsPerTrunk: MAX_REVIEWS,
+    });
+    const first = await mgr.getOrCreate("ses_parent_1", 10);
+    await mgr.recordReviewed("ses_parent_1", 10);
+    const second = await mgr.getOrCreate("ses_parent_1", 15);
+    expect(second.sessionID).toBe(first.sessionID);
+    expect(second.deltaStart).toBe(10);
+  });
 
-interface FakeClientPost {
-  post: (opts: FakePostOptions) => Promise<unknown>;
-}
+  test("recordReviewed is a no-op for unknown parents", async () => {
+    const { sdk } = makeFakeSdk();
+    const mgr = new GuardianTrunkManager({
+      factory: createTrunkFactoryFromSdk(sdk, "guardian-review"),
+      title: "guardian-review",
+      maxReviewsPerTrunk: MAX_REVIEWS,
+    });
+    await expect(mgr.recordReviewed("ses_unknown", 5)).resolves.toBeUndefined();
+  });
 
-interface FakeCreateId {
-  id: string;
-}
+  test("recycles trunk after maxReviewsPerTrunk reviews", async () => {
+    const { sdk, calls } = makeFakeSdk({ existingTrunks: [] });
+    const mgr = new GuardianTrunkManager({
+      factory: createTrunkFactoryFromSdk(sdk, "guardian-review"),
+      title: "guardian-review",
+      maxReviewsPerTrunk: MAX_REVIEWS,
+    });
+    const first = await mgr.getOrCreate("ses_parent_1", 10);
+    for (let i = 0; i < MAX_REVIEWS; i += 1) {
+      await mgr.recordReviewed("ses_parent_1", 10);
+    }
+    const second = await mgr.getOrCreate("ses_parent_1", 10);
+    expect(second.sessionID).not.toBe(first.sessionID);
+    expect(second.deltaStart).toBe(0);
+    expect(calls.some((c) => c.kind === "delete")).toBe(true);
+  });
+});
 
-interface FakeCreateResponse {
-  data: FakeCreateId;
-}
+describe("GuardianTrunkManager — invalidate", () => {
+  test("invalidate deletes the trunk and removes it from the cache", async () => {
+    const { sdk, calls } = makeFakeSdk();
+    const mgr = new GuardianTrunkManager({
+      factory: createTrunkFactoryFromSdk(sdk, "guardian-review"),
+      title: "guardian-review",
+      maxReviewsPerTrunk: MAX_REVIEWS,
+    });
+    await mgr.getOrCreate("ses_parent_1", 10);
+    await mgr.invalidate("ses_parent_1");
+    expect(calls.filter((c) => c.kind === "delete")).toHaveLength(1);
+    const next = await mgr.getOrCreate("ses_parent_1", 10);
+    expect(next.sessionID).toBe("ses_grd_2");
+  });
 
-interface FakeClientSession {
-  _client: FakeClientPost;
-  create: (this: FakeClientSession, args: unknown) => Promise<FakeCreateResponse>;
-  delete: (this: FakeClientSession, args: unknown) => Promise<unknown>;
-}
-
-interface FakeClient {
-  session: FakeClientSession;
-}
-
-interface FakeClientOverrides {
-  createResponse?: FakeCreateResponse;
-}
-
-function makeFakeClient(overrides: FakeClientOverrides = {}): FakeClient {
-  const fallback: FakeCreateResponse = overrides.createResponse ?? { data: { id: "ses_grd_x" } };
-  return {
-    session: {
-      _client: {
-        post: async (_opts: FakePostOptions) => fallback,
-      },
-      create(this: FakeClientSession, _args: unknown) {
-        if (!this) throw new Error("create() called without `this`");
-        if (!this._client) throw new Error("this._client is undefined");
-        return this._client.post({ url: "/session" }).then(() => fallback);
-      },
-      delete(this: FakeClientSession, _args: unknown) {
-        if (!this) throw new Error("delete() called without `this`");
-        if (!this._client) throw new Error("this._client is undefined");
-        return this._client.post({ url: "/session/ses_grd_x" });
-      },
-    },
-  };
-}
+  test("invalidateAll tears down every cached parent", async () => {
+    const { sdk, calls } = makeFakeSdk();
+    const mgr = new GuardianTrunkManager({
+      factory: createTrunkFactoryFromSdk(sdk, "guardian-review"),
+      title: "guardian-review",
+      maxReviewsPerTrunk: MAX_REVIEWS,
+    });
+    await mgr.getOrCreate("ses_parent_1", 0);
+    await mgr.getOrCreate("ses_parent_2", 0);
+    await mgr.getOrCreate("ses_parent_3", 0);
+    await mgr.invalidateAll();
+    expect(calls.filter((c) => c.kind === "delete")).toHaveLength(3);
+  });
+});
 
 describe("createTrunkFactoryFromSdk", () => {
-  test("createReviewSession returns data.id from session.create", async () => {
+  test("findExistingTrunk returns undefined on 404 children response", async () => {
     const sdk: SessionAdminClient = {
       session: {
-        create: async (args: SessionCreateArgs) => ({
-          data: { id: `ses_for_${args.body?.parentID ?? ""}` },
-        }),
-        delete: async () => ({}),
-      },
-    };
-    const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
-    const id = await factory.createReviewSession("ses_parent_1");
-    expect(id).toBe("ses_for_ses_parent_1");
-  });
-
-  test("createReviewSession throws when SDK does not expose session.create", async () => {
-    const sdk: SessionAdminClient = { session: {} };
-    const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
-    await expect(factory.createReviewSession("ses_parent_1")).rejects.toThrow(/session\.create/);
-  });
-
-  test("createReviewSession throws when create returns no id", async () => {
-    const sdk: SessionAdminClient = {
-      session: { create: async () => ({ data: {} }), delete: async () => ({}) },
-    };
-    const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
-    await expect(factory.createReviewSession("ses_parent_1")).rejects.toThrow(/no id/);
-  });
-
-  test("deleteReviewSession swallows 404 responses", async () => {
-    const calls: SessionDeleteArgs[] = [];
-    const sdk: SessionAdminClient = {
-      session: {
-        create: async () => ({ data: { id: "ses_grd" } }),
-        delete: async (args: SessionDeleteArgs) => {
-          calls.push(args);
-          const err = new Error("not found") as StatusError;
+        children: async () => {
+          const err = new Error("not found") as Error & { status?: number };
           err.status = 404;
           throw err;
         },
       },
     };
     const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
-    await expect(factory.deleteReviewSession("ses_grd")).resolves.toBeUndefined();
-    expect(calls).toEqual([{ path: { id: "ses_grd" } }]);
+    await expect(factory.findExistingTrunk("ses_parent_1")).resolves.toBeUndefined();
   });
 
-  test("deleteReviewSession rethrows non-404 errors", async () => {
+  test("findExistingTrunk rethrows non-404 errors", async () => {
     const sdk: SessionAdminClient = {
       session: {
-        create: async () => ({ data: { id: "ses_grd" } }),
-        delete: async () => {
-          const err = new Error("server error") as StatusError;
+        children: async () => {
+          const err = new Error("server error") as Error & { status?: number };
           err.status = 500;
           throw err;
         },
       },
     };
     const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
-    await expect(factory.deleteReviewSession("ses_grd")).rejects.toThrow(/server error/);
+    await expect(factory.findExistingTrunk("ses_parent_1")).rejects.toThrow(/server error/);
   });
 
-  test("deleteReviewSession warns and resolves when SDK does not expose session.delete", async () => {
-    const warns: string[] = [];
-    const sdk = { session: { create: async () => ({ data: { id: "ses_grd" } }) } };
-    const factory = createTrunkFactoryFromSdk(sdk, "guardian-review", (m) => warns.push(m));
-    await expect(factory.deleteReviewSession("ses_grd")).resolves.toBeUndefined();
-    expect(warns).toHaveLength(1);
-    expect(warns[0]).toMatch(/leaked/);
+  test("findExistingTrunk tolerates raw-array response shape", async () => {
+    const trunks: GuardianSessionInfo[] = [makeTrunk("ses_grd_1", { parentID: "ses_parent_1", created: 1_000 })];
+    const sdk: SessionAdminClient = {
+      session: {
+        children: async () => trunks,
+        get: async () => ({ data: { id: "ses_grd_1", title: "guardian-review" } }),
+      },
+    };
+    const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
+    await expect(factory.findExistingTrunk("ses_parent_1")).resolves.toBe("ses_grd_1");
   });
 
-  // Regression for "this._client is undefined" — when a method that
-  // reads `this._client` is hoisted out of its receiver and called
-  // as a free function, `this` becomes undefined. The factory must
-  // always invoke through the session object so the SDK method's
-  // `this` binding is preserved.
+  test("findExistingTrunk falls back to create when get returns 404", async () => {
+    const trunks: GuardianSessionInfo[] = [makeTrunk("ses_grd_x")];
+    const sdk: SessionAdminClient = {
+      session: {
+        children: async () => ({ data: trunks }),
+        get: async () => {
+          const err = new Error("not found") as Error & { status?: number };
+          err.status = 404;
+          throw err;
+        },
+      },
+    };
+    const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
+    await expect(factory.findExistingTrunk("ses_parent_1")).resolves.toBeUndefined();
+  });
+
+  test("createReviewSession preserves SDK method `this` binding", async () => {
+    const sdk = makeFakeSdk().sdk;
+    const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
+    const id = await factory.createReviewSession("ses_parent_1");
+    expect(typeof id).toBe("string");
+  });
+});
+
+// Regression for "this._client is undefined" — when a method that
+// reads `this._client` is hoisted out of its receiver and called
+// as a free function, `this` becomes undefined. The factory must
+// always invoke through the session object so the SDK method's
+// `this` binding is preserved.
+describe("createTrunkFactoryFromSdk — `this` binding regression", () => {
+  interface FakePostOptions {
+    url: string;
+  }
+
+  interface FakeClientPost {
+    post: (opts: FakePostOptions) => Promise<unknown>;
+  }
+
+  interface FakeCreateId {
+    id: string;
+  }
+
+  interface FakeCreateResponse {
+    data: FakeCreateId;
+  }
+
+  interface FakeClientSession {
+    _client: FakeClientPost;
+    create: (this: FakeClientSession, args: unknown) => Promise<FakeCreateResponse>;
+    delete: (this: FakeClientSession, args: unknown) => Promise<unknown>;
+    children: (this: FakeClientSession, args: unknown) => Promise<unknown>;
+    get: (this: FakeClientSession, args: unknown) => Promise<unknown>;
+  }
+
+  interface FakeClient {
+    session: FakeClientSession;
+  }
+
+  interface MakeFakeClientOverrides {
+    createResponse?: FakeCreateResponse;
+  }
+
+  function makeFakeClient(overrides: MakeFakeClientOverrides = {}): FakeClient {
+    const fallback: FakeCreateResponse = overrides.createResponse ?? { data: { id: "ses_grd_x" } };
+    return {
+      session: {
+        _client: {
+          post: async (_opts: FakePostOptions) => fallback,
+        },
+        create(this: FakeClientSession, _args: unknown) {
+          if (!this) throw new Error("create() called without `this`");
+          if (!this._client) throw new Error("this._client is undefined");
+          return this._client.post({ url: "/session" }).then(() => fallback);
+        },
+        delete(this: FakeClientSession, _args: unknown) {
+          if (!this) throw new Error("delete() called without `this`");
+          if (!this._client) throw new Error("this._client is undefined");
+          return this._client.post({ url: "/session/ses_grd_x" });
+        },
+        children(this: FakeClientSession, _args: unknown) {
+          if (!this) throw new Error("children() called without `this`");
+          if (!this._client) throw new Error("this._client is undefined");
+          return this._client.post({ url: "/session/.../children" }).then(() => ({ data: [] }));
+        },
+        get(this: FakeClientSession, _args: unknown) {
+          if (!this) throw new Error("get() called without `this`");
+          if (!this._client) throw new Error("this._client is undefined");
+          return this._client.post({ url: "/session/ses_grd_x" }).then(() => ({ data: { id: "ses_grd_x" } }));
+        },
+      },
+    };
+  }
+
   test("createReviewSession preserves SDK method `this` binding", async () => {
     const sdk: SessionAdminClient = makeFakeClient();
     const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
@@ -316,5 +369,11 @@ describe("createTrunkFactoryFromSdk", () => {
     const sdk: SessionAdminClient = makeFakeClient();
     const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
     await expect(factory.deleteReviewSession("ses_grd_x")).resolves.toBeUndefined();
+  });
+
+  test("findExistingTrunk preserves SDK method `this` binding", async () => {
+    const sdk: SessionAdminClient = makeFakeClient();
+    const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
+    await expect(factory.findExistingTrunk("ses_parent_1")).resolves.toBeUndefined();
   });
 });

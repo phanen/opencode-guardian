@@ -148,8 +148,8 @@ export interface SdkClientWithRawPost {
 }
 
 // Minimal shape the trunk manager needs from the SDK. Mirrors
-// `client.session.create / .delete` so the manager can be tested without
-// the full OpencodeClient.
+// `client.session.create / .delete / .children / .get / .messages` so
+// the manager can be tested without the full OpencodeClient.
 export interface SessionCreateBody {
   parentID?: string;
   title?: string;
@@ -167,9 +167,55 @@ export interface SessionDeleteArgs {
   path: SessionDeletePath;
 }
 
+export interface SessionPathArg {
+  id: string;
+}
+
+export interface SessionChildrenArgs {
+  path: SessionPathArg;
+}
+
+export interface SessionGetArgs {
+  path: SessionPathArg;
+}
+
+export interface SessionMessagesArgs {
+  path: SessionPathArg;
+}
+
+export interface GuardianSessionSummary {
+  additions: number;
+  deletions: number;
+  files: number;
+}
+
+export interface GuardianSessionTimestamps {
+  created: number;
+  updated: number;
+}
+
+export interface GuardianSessionInfo {
+  id: string;
+  parentID?: string;
+  title: string;
+  time: GuardianSessionTimestamps;
+  summary?: GuardianSessionSummary;
+}
+
+export interface GuardianSessionMessageInfo {
+  role: string;
+}
+
+export interface GuardianSessionMessagesItem {
+  info: GuardianSessionMessageInfo;
+}
+
 export interface SessionAdminSession {
   create?: (args: SessionCreateArgs) => Promise<unknown>;
   delete?: (args: SessionDeleteArgs) => Promise<unknown>;
+  children?: (args: SessionChildrenArgs) => Promise<unknown>;
+  get?: (args: SessionGetArgs) => Promise<unknown>;
+  messages?: (args: SessionMessagesArgs) => Promise<unknown>;
 }
 
 export interface SessionAdminClient {

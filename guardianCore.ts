@@ -5,11 +5,18 @@ import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from
 import { GuardianReviewError, type GuardianQuestionDecision } from "./review";
 import type { GuardianMode } from "./state";
 import type { ModelRef, PermissionAskedRequest, QuestionAskedRequest, RawEvent } from "./types";
+import type { AcquiredTrunk } from "./guardianTrunk";
 // `debugLog` is the runtime target of the $log! macro below; it is
 // referenced by the expanded output and must stay imported.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { debugLog } from "./utils";
 import { $log } from "./debugLog.macro";
+
+export type GuardianTrunkHandle = AcquiredTrunk;
+
+export interface GuardianReviewRunOptions {
+  sessionID: string;
+}
 
 // Re-export for plugin consumers.
 export type { PermissionAskedRequest, QuestionAskedRequest } from "./types";
@@ -28,6 +35,13 @@ export interface GuardianOptions {
   recentDenialWindow?: number;
   fallbackOnCircuitBreak?: boolean;
   debugLogPath?: string;
+  /**
+   * Maximum number of reviews to run against a single trunk session
+   * before it is recycled (deleted and replaced with a fresh one).
+   * Bounds the per-trunk message count so the LLM context does not
+   * grow without bound across long-lived agent sessions. Default 10.
+   */
+  maxReviewsPerTrunk?: number;
 }
 
 export type GuardianReply = "once" | "always" | "reject";
@@ -40,6 +54,7 @@ export interface GuardianRuntimeDeps {
     action: GuardianAction,
     transcript: GuardianTranscriptEntry[],
     signal?: AbortSignal,
+    runOptions?: GuardianReviewRunOptions,
   ) => Promise<GuardianAssessment>;
   /**
    * Reply to a pending permission request. The implementation should swallow
@@ -68,7 +83,25 @@ export interface GuardianRuntimeDeps {
     request: QuestionAskedRequest,
     transcript: GuardianTranscriptEntry[],
     signal?: AbortSignal,
+    runOptions?: GuardianReviewRunOptions,
   ) => Promise<GuardianQuestionDecision>;
+  /**
+   * Acquire (or reattach to) a guardian review session for the given
+   * parent agent session. Returns the trunk's review session id and
+   * the index from which the parent transcript should be sliced to
+   * form the next prompt's delta. The implementation is responsible
+   * for reusing an existing trunk, creating a new one, or recycling
+   * one that has hit its review ceiling.
+   */
+  acquireTrunk: (parentID: string, transcriptLength: number) => Promise<GuardianTrunkHandle>;
+  /**
+   * Record that a review was just run against the trunk for the given
+   * parent session, having sent `transcriptLength` entries of the
+   * parent transcript. Updates the delta cursor so the next review
+   * only re-sends new entries. The call is best-effort — the
+   * implementation should not throw on lookup miss.
+   */
+  recordTrunkReviewed: (parentID: string, transcriptLength: number) => Promise<void>;
   /**
    * Tear down all cached guardian review sessions (one per parent
    * agent session). Called on mode change so a switch between
@@ -275,13 +308,22 @@ export async function createGuardianHooks(options: GuardianOptions, deps: Guardi
 
     const transcript = await deps.loadTranscript(req.sessionID, transcriptCacheLimit);
     const action = actionFromPermission(req);
+    let trunk: GuardianTrunkHandle | undefined;
+    try {
+      trunk = await deps.acquireTrunk(req.sessionID, transcript.length);
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      $log!("ASK-USER", req.id, req.sessionID, action.permission, "guardian-trunk-acquire-failed", error);
+      return;
+    }
+    const transcriptDelta = transcript.slice(trunk.deltaStart);
     const patternsJson = JSON.stringify(patterns);
-    const transcriptEntries = transcript.length;
+    const transcriptEntries = transcriptDelta.length;
     $log!("REVIEW", req.id, req.sessionID, action.permission, patternsJson, transcriptEntries);
 
     let assessment: GuardianAssessment;
     try {
-      assessment = await deps.runReview(action, transcript);
+      assessment = await deps.runReview(action, transcriptDelta, undefined, { sessionID: trunk.sessionID });
     } catch (err) {
       // Fail-open: do not reply, leave the dialog to the user.
       const errorKind = err instanceof GuardianReviewError ? err.kind : "unknown";
@@ -289,6 +331,7 @@ export async function createGuardianHooks(options: GuardianOptions, deps: Guardi
       $log!("ASK-USER", req.id, req.sessionID, action.permission, "guardian-review-failed", errorKind, error);
       return;
     }
+    await deps.recordTrunkReviewed(req.sessionID, transcript.length);
 
     if (assessment.outcome === "allow") {
       circuitBreaker.recordAllow(req.sessionID);
@@ -402,7 +445,10 @@ export async function createGuardianHooks(options: GuardianOptions, deps: Guardi
     let decision: GuardianQuestionDecision;
     try {
       const transcript = await deps.loadTranscript(req.sessionID, transcriptCacheLimit);
-      decision = await deps.runQuestionReview(req, transcript);
+      const trunk = await deps.acquireTrunk(req.sessionID, transcript.length);
+      const transcriptDelta = transcript.slice(trunk.deltaStart);
+      decision = await deps.runQuestionReview(req, transcriptDelta, undefined, { sessionID: trunk.sessionID });
+      await deps.recordTrunkReviewed(req.sessionID, transcript.length);
     } catch (err) {
       const errorKind = err instanceof GuardianReviewError ? err.kind : "unknown";
       const error = err instanceof Error ? err.message : String(err);

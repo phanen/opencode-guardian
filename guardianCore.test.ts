@@ -29,6 +29,16 @@ interface TrunkInvalidateCall {
   count: number;
 }
 
+interface TrunkAcquireCall {
+  parentID: string;
+  transcriptLength: number;
+}
+
+interface TrunkReviewCall {
+  parentID: string;
+  transcriptLength: number;
+}
+
 interface Deps {
   mode: GuardianMode;
   decisions?: GuardianAssessment[];
@@ -48,6 +58,8 @@ function makeDeps(d: Deps) {
   const questionRejects: QuestionRejectCall[] = [];
   const questionReviewCalls: Array<QuestionAskedRequest> = [];
   const trunkInvalidations: TrunkInvalidateCall[] = [];
+  const trunkAcquires: TrunkAcquireCall[] = [];
+  const trunkReviews: TrunkReviewCall[] = [];
 
   const deps = {
     readMode: async () => mode,
@@ -87,6 +99,13 @@ function makeDeps(d: Deps) {
       const next = d.questionDecisions?.shift();
       return next ?? { action: "answer", answers: request.questions.map((q) => [q.options[0]?.label ?? ""]) };
     },
+    acquireTrunk: async (parentID: string, transcriptLength: number) => {
+      trunkAcquires.push({ parentID, transcriptLength });
+      return { sessionID: "ses_grd_test", deltaStart: 0 };
+    },
+    recordTrunkReviewed: async (parentID: string, transcriptLength: number) => {
+      trunkReviews.push({ parentID, transcriptLength });
+    },
     invalidateReviewTrunks: async () => {
       trunkInvalidations.push({ count: 1 });
     },
@@ -102,6 +121,8 @@ function makeDeps(d: Deps) {
     questionRejects,
     questionReviewCalls,
     trunkInvalidations,
+    trunkAcquires,
+    trunkReviews,
     getMode: () => mode,
   };
 }
