@@ -178,6 +178,57 @@ describe("GuardianTrunkManager", () => {
   });
 });
 
+interface FakePostOptions {
+  url: string;
+}
+
+interface FakeClientPost {
+  post: (opts: FakePostOptions) => Promise<unknown>;
+}
+
+interface FakeCreateId {
+  id: string;
+}
+
+interface FakeCreateResponse {
+  data: FakeCreateId;
+}
+
+interface FakeClientSession {
+  _client: FakeClientPost;
+  create: (this: FakeClientSession, args: unknown) => Promise<FakeCreateResponse>;
+  delete: (this: FakeClientSession, args: unknown) => Promise<unknown>;
+}
+
+interface FakeClient {
+  session: FakeClientSession;
+}
+
+interface FakeClientOverrides {
+  createResponse?: FakeCreateResponse;
+}
+
+function makeFakeClient(overrides: FakeClientOverrides = {}): FakeClient {
+  const fallback: FakeCreateResponse = overrides.createResponse ?? { data: { id: "ses_grd_x" } };
+  return {
+    session: {
+      _client: {
+        post: async (_opts: FakePostOptions) => fallback,
+      },
+      create(this: FakeClientSession, _args: unknown) {
+        if (!this) throw new Error("create() called without `this`");
+        if (!this._client) throw new Error("this._client is undefined");
+        return this._client.post({ url: "/session" }).then(() => fallback);
+      },
+      delete(this: FakeClientSession, _args: unknown) {
+        if (!this) throw new Error("delete() called without `this`");
+        if (!this._client) throw new Error("this._client is undefined");
+        return this._client.post({ url: "/session/ses_grd_x" });
+      },
+    },
+  };
+}
+
 describe("createTrunkFactoryFromSdk", () => {
   test("createReviewSession returns data.id from session.create", async () => {
     const sdk: SessionAdminClient = {
@@ -247,5 +298,23 @@ describe("createTrunkFactoryFromSdk", () => {
     await expect(factory.deleteReviewSession("ses_grd")).resolves.toBeUndefined();
     expect(warns).toHaveLength(1);
     expect(warns[0]).toMatch(/leaked/);
+  });
+
+  // Regression for "this._client is undefined" — when a method that
+  // reads `this._client` is hoisted out of its receiver and called
+  // as a free function, `this` becomes undefined. The factory must
+  // always invoke through the session object so the SDK method's
+  // `this` binding is preserved.
+  test("createReviewSession preserves SDK method `this` binding", async () => {
+    const sdk: SessionAdminClient = makeFakeClient();
+    const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
+    const id = await factory.createReviewSession("ses_parent_1");
+    expect(id).toBe("ses_grd_x");
+  });
+
+  test("deleteReviewSession preserves SDK method `this` binding", async () => {
+    const sdk: SessionAdminClient = makeFakeClient();
+    const factory = createTrunkFactoryFromSdk(sdk, "guardian-review");
+    await expect(factory.deleteReviewSession("ses_grd_x")).resolves.toBeUndefined();
   });
 });

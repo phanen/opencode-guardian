@@ -124,23 +124,25 @@ export function createTrunkFactoryFromSdk(
   const warn = onWarn ?? (() => {});
   return {
     createReviewSession: async (parentID) => {
-      const create = sdk.session.create;
-      if (!create) {
+      if (!sdk.session.create) {
         throw new Error("opencode SDK does not expose session.create");
       }
-      const res = (await create({ body: { parentID, title } })) as SessionCreateDataPayload;
+      // Must invoke through the session object so the SDK method's
+      // `this` binding is preserved; hoisting it to a local breaks the
+      // call (`this._client` becomes undefined inside the SDK).
+      const res = (await sdk.session.create({ body: { parentID, title } })) as SessionCreateDataPayload;
       const id = res?.data?.id;
       if (!id) throw new Error("session.create returned no id");
       return id;
     },
     deleteReviewSession: async (sessionID) => {
-      const del = sdk.session.delete;
-      if (!del) {
+      if (!sdk.session.delete) {
         warn(`session.delete not exposed; guardian review session ${sessionID} leaked`);
         return;
       }
       try {
-        await del({ path: { id: sessionID } });
+        // Same `this` binding rule as `createReviewSession` above.
+        await sdk.session.delete({ path: { id: sessionID } });
       } catch (err) {
         const status = extractStatus(err);
         if (status === 404) return;
