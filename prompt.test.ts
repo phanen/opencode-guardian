@@ -276,3 +276,118 @@ describe("parseQuestionDecision — (Recommended) suffix and fuzzy match", () =>
     ).toThrow(/unknown label/);
   });
 });
+
+describe("parseQuestionDecision — flat answers auto-wrap", () => {
+  const singleQuestion: QuestionAskedRequest = {
+    id: "q-flat-1",
+    sessionID: "ses-1",
+    questions: [
+      {
+        question: "Pick one",
+        header: "h",
+        options: [
+          { label: "成功, 看到了 question UI", description: "" },
+          { label: "成功, 但 UI 渲染有问题", description: "" },
+          { label: "没有看到 dialog", description: "" },
+        ],
+      },
+    ],
+  };
+
+  const multiQuestion: QuestionAskedRequest = {
+    id: "q-flat-2",
+    sessionID: "ses-1",
+    questions: [
+      {
+        question: "Q1",
+        header: "h1",
+        options: [
+          { label: "A", description: "" },
+          { label: "B", description: "" },
+        ],
+      },
+      {
+        question: "Q2",
+        header: "h2",
+        options: [
+          { label: "X", description: "" },
+          { label: "Y", description: "" },
+        ],
+      },
+    ],
+  };
+
+  test("auto-wraps flat answer array for a single question", () => {
+    const r = parseQuestionDecision(
+      JSON.stringify({ action: "answer", answers: ["成功, 看到了 question UI"] }),
+      singleQuestion,
+    );
+    expect(r.action).toBe("answer");
+    if (r.action === "answer") {
+      expect(r.answers).toEqual([["成功, 看到了 question UI"]]);
+    }
+  });
+
+  test("auto-wraps flat answer array for multiple questions", () => {
+    const r = parseQuestionDecision(JSON.stringify({ action: "answer", answers: ["A", "Y"] }), multiQuestion);
+    expect(r.action).toBe("answer");
+    if (r.action === "answer") {
+      expect(r.answers).toEqual([["A"], ["Y"]]);
+    }
+  });
+
+  test("flat answer honors (Recommended) suffix stripping", () => {
+    const req: QuestionAskedRequest = {
+      id: "q-flat-3",
+      sessionID: "ses-1",
+      questions: [
+        {
+          question: "Pick",
+          header: "h",
+          options: [
+            { label: "派之前先确认 spec (Recommended)", description: "" },
+            { label: "你写啥我派啥", description: "" },
+          ],
+        },
+      ],
+    };
+    const r = parseQuestionDecision(JSON.stringify({ action: "answer", answers: ["派之前先确认 spec"] }), req);
+    expect(r.action).toBe("answer");
+    if (r.action === "answer") {
+      expect(r.answers).toEqual([["派之前先确认 spec (Recommended)"]]);
+    }
+  });
+
+  test("flat answer length mismatch throws", () => {
+    expect(() =>
+      parseQuestionDecision(JSON.stringify({ action: "answer", answers: ["A", "B"] }), singleQuestion),
+    ).toThrow(/answers\.length=2/);
+  });
+
+  test("rejects mixed-shape answers (string + array)", () => {
+    expect(() =>
+      parseQuestionDecision(JSON.stringify({ action: "answer", answers: [["A"], "B"] }), multiQuestion),
+    ).toThrow(/non-empty array of label strings/);
+  });
+
+  test("still accepts canonical nested-array answers", () => {
+    const r = parseQuestionDecision(JSON.stringify({ action: "answer", answers: [["A", "B"]] }), {
+      id: "q-flat-4",
+      sessionID: "ses-1",
+      questions: [
+        {
+          question: "Pick many",
+          header: "h",
+          options: [
+            { label: "A", description: "" },
+            { label: "B", description: "" },
+          ],
+        },
+      ],
+    });
+    expect(r.action).toBe("answer");
+    if (r.action === "answer") {
+      expect(r.answers).toEqual([["A", "B"]]);
+    }
+  });
+});

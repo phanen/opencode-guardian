@@ -359,6 +359,87 @@ function findClosestOption(candidate: string, options: ReadonlyArray<QuestionOpt
   return best;
 }
 
+// Resolve a single LLM-supplied label against the option set for one
+// question. Returns the canonical option label, or throws. Used for
+// every element in `answers`, regardless of whether the LLM wrapped
+// the answer in a nested array or wrote a flat array of labels.
+function resolveQuestionLabel(
+  value: string,
+  questionIndex: number,
+  options: ReadonlyArray<QuestionOptionLike>,
+): string {
+  if (!isLabelValid(value)) {
+    throw new Error(`guardian question response answers[${questionIndex}] contains non-string label: ${String(value)}`);
+  }
+  const normalizedValidLabels = new Map<string, string>();
+  for (const opt of options) {
+    normalizedValidLabels.set(normalizeQuestionLabel(opt.label), opt.label);
+  }
+  // First try exact match on the normalized label so that a
+  // trimmed " (Recommended)" suffix still resolves to the canonical
+  // option label.
+  const normalized = normalizeQuestionLabel(value);
+  const exact = normalizedValidLabels.get(normalized);
+  if (exact) return exact;
+  // Fall back to fuzzy match against the normalized option
+  // labels. Conservative: an obviously different label (no shared
+  // prefix above the threshold) still errors out, so the caller can
+  // fall back to the user.
+  const fuzzy = findClosestOption(value, options);
+  if (fuzzy) return fuzzy.option.label;
+  throw new Error(`guardian question response answers[${questionIndex}] contains unknown label: ${value}`);
+}
+
+function isFlatAnswers(rawAnswers: unknown[]): boolean {
+  return rawAnswers.length > 0 && rawAnswers.every((x) => typeof x === "string");
+}
+
+function resolveQuestionAnswers(rawAnswers: unknown[], request: QuestionAskedRequest): string[][] {
+  // LLMs occasionally write a flat `["label1", "label2"]` for a
+  // multi-question payload instead of the requested
+  // `[["label1"], ["label2"]]` (one label per question). Auto-wrap
+  // when every element is a string and the length matches the
+  // number of questions — that is, the LLM clearly meant "one
+  // label per question" but dropped the outer array. A mixed shape
+  // like `[["A"], "B"]` is treated as a hard error so we do not
+  // silently reinterpret a real mistake.
+  if (isFlatAnswers(rawAnswers)) {
+    if (rawAnswers.length !== request.questions.length) {
+      throw new Error(
+        `guardian question response answers.length=${rawAnswers.length} does not match questions.length=${request.questions.length}`,
+      );
+    }
+    return rawAnswers.map((label, i) => {
+      const options = request.questions[i]?.options ?? [];
+      return [resolveQuestionLabel(label as string, i, options)];
+    });
+  }
+
+  if (rawAnswers.length !== request.questions.length) {
+    throw new Error(
+      `guardian question response answers.length=${rawAnswers.length} does not match questions.length=${request.questions.length}`,
+    );
+  }
+
+  const answers: string[][] = [];
+  for (let i = 0; i < rawAnswers.length; i++) {
+    const arr = rawAnswers[i];
+    if (!Array.isArray(arr) || arr.length === 0) {
+      throw new Error(`guardian question response answers[${i}] must be a non-empty array of label strings`);
+    }
+    const options = request.questions[i]?.options ?? [];
+    const labels: string[] = [];
+    for (const v of arr) {
+      if (typeof v !== "string") {
+        throw new Error(`guardian question response answers[${i}] must contain only label strings, got ${typeof v}`);
+      }
+      labels.push(resolveQuestionLabel(v, i, options));
+    }
+    answers.push(labels);
+  }
+  return answers;
+}
+
 export function parseQuestionDecision(
   text: string,
   request: QuestionAskedRequest,
@@ -387,48 +468,6 @@ export function parseQuestionDecision(
   if (!Array.isArray(rawAnswers)) {
     throw new Error("guardian question response 'answer' action requires an 'answers' array");
   }
-  if (rawAnswers.length !== request.questions.length) {
-    throw new Error(
-      `guardian question response answers.length=${rawAnswers.length} does not match questions.length=${request.questions.length}`,
-    );
-  }
-  const answers: string[][] = [];
-  for (let i = 0; i < rawAnswers.length; i++) {
-    const arr = rawAnswers[i];
-    if (!Array.isArray(arr) || arr.length === 0) {
-      throw new Error(`guardian question response answers[${i}] must be a non-empty array of label strings`);
-    }
-    const options = request.questions[i]?.options ?? [];
-    const normalizedValidLabels = new Map<string, string>();
-    for (const opt of options) {
-      normalizedValidLabels.set(normalizeQuestionLabel(opt.label), opt.label);
-    }
-    const labels: string[] = [];
-    for (const v of arr) {
-      if (!isLabelValid(v)) {
-        throw new Error(`guardian question response answers[${i}] contains non-string label: ${String(v)}`);
-      }
-      // First try exact match on the normalized label so that a
-      // trimmed " (Recommended)" suffix still resolves to the
-      // canonical option label.
-      const normalized = normalizeQuestionLabel(v);
-      const exact = normalizedValidLabels.get(normalized);
-      if (exact) {
-        labels.push(exact);
-        continue;
-      }
-      // Fall back to fuzzy match against the normalized option
-      // labels. This is intentionally conservative: an obviously
-      // different label (no shared prefix above the threshold) still
-      // errors out, so the caller can fall back to the user.
-      const fuzzy = findClosestOption(v, options);
-      if (fuzzy) {
-        labels.push(fuzzy.option.label);
-        continue;
-      }
-      throw new Error(`guardian question response answers[${i}] contains unknown label: ${v}`);
-    }
-    answers.push(labels);
-  }
+  const answers = resolveQuestionAnswers(rawAnswers, request);
   return { action: "answer", answers };
 }
