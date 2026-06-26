@@ -13,6 +13,10 @@ The script registers the plugin via `opencode plugin -g` and copies `commands/gu
 
 ## Modes
 
+> [!NOTE]
+> Throw error is expected: see https://github.com/anomalyco/opencode/issues/28292#issuecomment-4493933602
+> tui can refresh the screen by resizing.
+
 - **user** (default) - Plugin is passive. No auto-review. All approvals go to the human.
 - **auto_review** - Every approval request is routed to the guardian LLM, which returns allow/deny. The user is only asked for the actions the guardian chose to escalate.
 

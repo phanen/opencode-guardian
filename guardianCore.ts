@@ -1,5 +1,5 @@
 import type { Hooks } from "@opencode-ai/plugin";
-import type { Part, TextPart } from "@opencode-ai/sdk";
+import type { TextPart } from "@opencode-ai/sdk";
 import { maybeHandleGuardianCommand, statusLineFor } from "./commands";
 import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
 import { GuardianReviewError, type GuardianQuestionDecision } from "./review";
@@ -515,21 +515,30 @@ export async function createGuardianHooks(options: GuardianOptions, deps: Guardi
       }
     },
 
-    "command.execute.before": async (input, output) => {
+    "command.execute.before": async (input, _output) => {
       if (input.command !== GUARDIAN_COMMAND_NAME) return;
       activeGuardianCommandSessions.add(input.sessionID);
 
       try {
+        // This hook throws on purpose. opencode's command.execute.before
+        // runs before `prompt()`, which is the only place a user message
+        // is written to the session and the LLM is invoked. Throwing
+        // short-circuits both, so the user's `/guardian <args>` text
+        // is never persisted, never sent to the model, and never
+        // appears in any subsequent LLM context. The error surfaces
+        // in the TUI/Web as a toast, which is enough feedback for a
+        // pure state-flip command.
+        //
+        // See packages/opencode/src/session/prompt.ts:
+        //   - plugin.trigger("command.execute.before", ...)  (this hook)
+        //   - prompt({...})                                  (writes user msg + calls LLM)
+        // and packages/opencode/src/plugin/index.ts trigger():
+        //   - yield* Effect.promise(async () => fn(input, output))
+        // — a thrown error rejects the Effect, propagates up, and the
+        // HTTP handler maps it to a BadRequest response. No LLM call.
         const args = input.arguments.trim().toLowerCase();
-        let text: string;
-        if (args === "start" || args === "kickoff") {
-          text =
-            mode === "auto_review"
-              ? "Guardian mode is auto_review. Approval requests will be LLM-reviewed automatically."
-              : "Guardian mode is user. Switch with /guardian on to enable auto-review.";
-        } else {
-          const commandText = args ? `/guardian ${args}` : "/guardian";
-          const result = await maybeHandleGuardianCommand(commandText, {
+        const handleAndThrow = async (text: string) => {
+          const result = await maybeHandleGuardianCommand(text, {
             readMode: deps.readMode,
             writeMode: deps.writeMode,
           });
@@ -541,27 +550,22 @@ export async function createGuardianHooks(options: GuardianOptions, deps: Guardi
             // active. Tear them down on any mode switch so the next
             // review creates a fresh trunk under the new policy.
             await deps.invalidateReviewTrunks();
+            $log!("CMD", input.sessionID, "/guardian", argsJson, statusLineFor(result.mode).slice(0, 120));
+            throw new Error(statusLineFor(result.mode));
           }
-          text =
-            result.handled && result.mode
-              ? statusLineFor(result.mode)
-              : `Unknown /guardian argument: ${args || "(none)"}`;
+          throw new Error(`Unknown /guardian argument: ${input.arguments || "(none)"}`);
+        };
+
+        if (args === "start" || args === "kickoff") {
+          const current = await deps.readMode();
+          await handleAndThrow(current === "auto_review" ? "/guardian status" : "/guardian on");
+        } else {
+          await handleAndThrow(args ? `/guardian ${args}` : "/guardian");
         }
-        // Mutate the existing parts array in place rather than reassigning
-        // output.parts — OpenCode's command.execute.before consumer reads
-        // `parts` from its closure scope, so a reassignment would not be
-        // visible to it.
-        output.parts.length = 0;
-        // Synthetic TextPart for the command response — id/sessionID/messageID
-        // are not meaningful for the LLM-facing command echo, so we cast.
-        output.parts.push({ type: "text", text } as Part);
-        const argsJson = JSON.stringify(input.arguments);
-        const responseText = text.slice(0, 120);
-        $log!("CMD", input.sessionID, "/guardian", argsJson, responseText);
       } finally {
-        // /guardian is a synchronous text-only command — the entire body
-        // lives in this hook. Clear the active flag so subsequent tool
-        // calls in this session are not silently denied.
+        // /guardian is a synchronous state-only command — clear the
+        // active flag so subsequent tool calls in this session are
+        // not silently denied, regardless of whether the hook threw.
         activeGuardianCommandSessions.delete(input.sessionID);
       }
     },

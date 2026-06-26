@@ -1,9 +1,4 @@
-import {
-  __test_internals,
-  createGuardianHooks,
-  type CommandExecuteBeforeOutput,
-  type GuardianReply,
-} from "./guardianCore";
+import { __test_internals, createGuardianHooks, type GuardianReply } from "./guardianCore";
 import type { GuardianAction, GuardianAssessment, GuardianTranscriptEntry } from "./prompt";
 import { GuardianReviewError, type GuardianQuestionDecision } from "./review";
 import type { GuardianMode } from "./state";
@@ -314,10 +309,15 @@ describe("guardianCore — event-driven permission review", () => {
   test("active-command flag is cleared after /guardian returns (regression)", async () => {
     const t = makeDeps({ mode: "auto_review" });
     const hooks = await createGuardianHooks({}, t.deps);
-    await hooks["command.execute.before"]!(
-      { command: "guardian", sessionID: "ses-cmd", arguments: "status" },
-      { parts: [] },
-    );
+    // The slash command hook throws on purpose to keep the LLM out
+    // of the loop. Swallow the throw here — this test only cares
+    // about the active-flag side effect, not the error surface.
+    await expect(
+      hooks["command.execute.before"]!(
+        { command: "guardian", sessionID: "ses-cmd", arguments: "status" },
+        { parts: [] },
+      ),
+    ).rejects.toThrow(/Guardian mode/);
     await emitPermissionAsked(hooks, {
       id: "req-after",
       sessionID: "ses-cmd",
@@ -333,10 +333,12 @@ describe("guardianCore — event-driven permission review", () => {
   test("bash tool is not rewritten to no-op after /guardian returns (regression)", async () => {
     const t = makeDeps({ mode: "user" });
     const hooks = await createGuardianHooks({}, t.deps);
-    await hooks["command.execute.before"]!(
-      { command: "guardian", sessionID: "ses-cmd-2", arguments: "status" },
-      { parts: [] },
-    );
+    await expect(
+      hooks["command.execute.before"]!(
+        { command: "guardian", sessionID: "ses-cmd-2", arguments: "status" },
+        { parts: [] },
+      ),
+    ).rejects.toThrow(/Guardian mode/);
     const out = { args: { command: "ls" } };
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "ses-cmd-2", callID: "c-1" }, out);
     expect(out.args).toMatchObject({ command: "ls" });
@@ -358,11 +360,11 @@ describe("guardianCore — event-driven permission review", () => {
       { maxConsecutiveDenials: 3, maxRecentDenials: 100, recentDenialWindow: 50 },
       t.deps,
     );
-    // Run /guardian to set the active flag
-    await hooks["command.execute.before"]!(
-      { command: "guardian", sessionID: "ses-idle", arguments: "on" },
-      { parts: [] },
-    );
+    // Run /guardian to set the active flag. The hook throws, but the
+    // try/finally inside the hook still runs, clearing the flag.
+    await expect(
+      hooks["command.execute.before"]!({ command: "guardian", sessionID: "ses-idle", arguments: "on" }, { parts: [] }),
+    ).rejects.toThrow(/Guardian mode/);
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses-idle" } } });
     // After idle the active flag must be cleared and circuit breaker reset.
     await hooks["tool.execute.before"]!(
@@ -393,21 +395,32 @@ describe("guardianCore — event-driven permission review", () => {
     expect(t.replies).toEqual([]);
   });
 
-  test("/guardian command updates mode and returns status text", async () => {
+  test("/guardian command updates mode and throws the status text", async () => {
     const t = makeDeps({ mode: "user" });
     const hooks = await createGuardianHooks({}, t.deps);
-    const out: CommandExecuteBeforeOutput = { parts: [] };
-    await hooks["command.execute.before"]!({ command: "guardian", sessionID: "ses-cmd-3", arguments: "on" }, out);
+    await expect(
+      hooks["command.execute.before"]!(
+        { command: "guardian", sessionID: "ses-cmd-3", arguments: "on" },
+        {
+          parts: [],
+        },
+      ),
+    ).rejects.toThrow(/auto_review/);
     expect(t.getMode()).toBe("auto_review");
-    expect(out.parts[0]?.text).toMatch(/auto_review/);
   });
 
   test("/guardian mode switch invalidates cached review trunks", async () => {
     const t = makeDeps({ mode: "user" });
     const hooks = await createGuardianHooks({}, t.deps);
     expect(t.trunkInvalidations).toHaveLength(0);
-    const out: CommandExecuteBeforeOutput = { parts: [] };
-    await hooks["command.execute.before"]!({ command: "guardian", sessionID: "ses-cmd-3", arguments: "on" }, out);
+    await expect(
+      hooks["command.execute.before"]!(
+        { command: "guardian", sessionID: "ses-cmd-3", arguments: "on" },
+        {
+          parts: [],
+        },
+      ),
+    ).rejects.toThrow(/Guardian mode/);
     expect(t.trunkInvalidations).toHaveLength(1);
   });
 
@@ -438,13 +451,34 @@ describe("guardianCore — event-driven permission review", () => {
     expect(t.trunkInvalidations).toHaveLength(1);
   });
 
-  test("unknown /guardian argument does not invalidate trunks", async () => {
+  test("unknown /guardian argument throws and does not invalidate trunks", async () => {
     const t = makeDeps({ mode: "user" });
     const hooks = await createGuardianHooks({}, t.deps);
-    const out: CommandExecuteBeforeOutput = { parts: [] };
-    await hooks["command.execute.before"]!({ command: "guardian", sessionID: "ses-cmd-3", arguments: "nope" }, out);
+    await expect(
+      hooks["command.execute.before"]!(
+        { command: "guardian", sessionID: "ses-cmd-3", arguments: "nope" },
+        {
+          parts: [],
+        },
+      ),
+    ).rejects.toThrow(/Unknown \/guardian argument/);
     expect(t.getMode()).toBe("user");
     expect(t.trunkInvalidations).toHaveLength(0);
+  });
+
+  test("/guardian with no arguments toggles the mode and throws", async () => {
+    const t = makeDeps({ mode: "auto_review" });
+    const hooks = await createGuardianHooks({}, t.deps);
+    // No-arg /guardian is a toggle: auto_review -> user.
+    await expect(
+      hooks["command.execute.before"]!(
+        { command: "guardian", sessionID: "ses-cmd-4", arguments: "" },
+        {
+          parts: [],
+        },
+      ),
+    ).rejects.toThrow(/Guardian mode/);
+    expect(t.getMode()).toBe("user");
   });
 
   test("session.idle event clears the circuit breaker for that session", async () => {
